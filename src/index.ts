@@ -4,7 +4,8 @@ import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { loadConfig, saveConfig, shouldAutoConnect } from "./config.js";
 import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
 import { answerHint, buildAskOutcome, parseAskAnswers, renderAskAnswersText } from "./ask.js";
-import { isReloadCommand } from "./chat-commands.js";
+import { formatContextUsage } from "./formatting.js";
+import { chatCommandName } from "./chat-commands.js";
 import { logVerification } from "./transports/verification.js";
 import type { AskRequest } from "./ask.js";
 import { acquireLock, releaseLock } from "./lock.js";
@@ -33,6 +34,9 @@ const RELOAD_COMMAND = "bridge-reload";
 
 /** Set when a chat asked to reload during a turn. */
 let reloadRequested = false;
+
+/** Deferred `!compact`, run once the current turn settles. */
+let compactRequestedFor: { chatId: string; transport: string } | null = null;
 
 /** Min interval between in-place edits of a live streamed message. */
 const STREAM_EDIT_THROTTLE_MS = 900;
@@ -184,6 +188,43 @@ export default function (pi: ExtensionAPI): void {
   }
 
   /**
+   * Compact the context and report the result into the chat that asked for it.
+   *
+   * `ctx.compact()` is fire-and-forget with callbacks, so the outcome is only
+   * known later — the chat gets a "compacting" line and then the result, which
+   * matters because a compaction that silently fails would look like nothing
+   * happened.
+   */
+  function runCompaction(chatId: string, transport: string): void {
+    const before = ctx.getContextUsage();
+    const reply = (text: string): void => {
+      transportManager
+        .sendMessage(chatId, transport, text)
+        .catch((err) => ctx.ui.notify(`Failed to send compaction status: ${(err as Error).message}`, "warning"));
+    };
+
+    reply(`🗜️ Compacting${before ? ` (was ${formatContextUsage(before)})` : ""}…`);
+    logVerification("chat command: compact");
+
+    try {
+      ctx.compact({
+        onComplete: () => {
+          const after = ctx.getContextUsage();
+          reply(`✅ Context compacted${after ? ` — now ${formatContextUsage(after)}` : ""}.`);
+          logVerification("chat command: compact done");
+        },
+        onError: (err: Error) => {
+          reply(`❌ Compaction failed: ${err.message}`);
+          logVerification(`chat command: compact FAILED: ${err.message}`);
+        },
+      });
+    } catch (err) {
+      reply(`❌ Compaction failed: ${(err as Error).message}`);
+      logVerification(`chat command: compact FAILED: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Force the response message to re-render immediately, guarded against
    * overlapping edits. Used by tool start/end events. If a render is already in
    * flight the new state is still captured in toolEntries and shown by the next
@@ -220,6 +261,11 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", () => {
+    if (compactRequestedFor) {
+      const target = compactRequestedFor;
+      compactRequestedFor = null;
+      runCompaction(target.chatId, target.transport);
+    }
     if (!reloadRequested) return;
     reloadRequested = false;
     // Dispatch as a command, not model input, so no turn is started for it.
@@ -340,7 +386,22 @@ export default function (pi: ExtensionAPI): void {
 
       // `!reload` / `/reload` from the chat reloads pi (extensions, skills,
       // prompts). Acknowledge first: the reload tears this runtime down.
-      if (isReloadCommand(msg.content)) {
+      const chatCommand = chatCommandName(msg.content);
+
+      if (chatCommand === "compact") {
+        if (ctx.isIdle()) {
+          runCompaction(msg.chatId, msg.transport);
+        } else {
+          // Compacting mid-turn would race the running request; defer it.
+          compactRequestedFor = { chatId: msg.chatId, transport: msg.transport };
+          await transportManager
+            .sendMessage(msg.chatId, msg.transport, "🗜️ Compacting once this turn finishes…")
+            .catch(() => {});
+        }
+        return;
+      }
+
+      if (chatCommand === "reload") {
         const idle = ctx.isIdle();
         logVerification(`chat command: ${RELOAD_COMMAND} (${idle ? "idle" : "mid-turn"})`);
         // Await the ack: reload tears the transport down, and an un-awaited send

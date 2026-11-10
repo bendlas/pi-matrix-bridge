@@ -205,6 +205,9 @@ pi-web's own command set leaves the name free) from a trusted user's DM:
 - `!reload` — reload extensions, skills and prompts. Dispatched immediately when
   the agent is idle, otherwise deferred to `agent_settled` so a running turn is
   never interrupted.
+- `!compact` — compact the context and report the usage before and after.
+  Deferred to the end of the turn if the agent is busy, because compacting
+  mid-request races the running call.
 - `!help`, `!session`, `stop`, `!matrix-bridge verify …` — see `/help`.
 
 Answering an `ask_user` question set works as a plain reply: `1a 2c` picks

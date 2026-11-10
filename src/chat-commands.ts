@@ -10,7 +10,7 @@
  */
 
 /** Commands the bridge acts on itself instead of forwarding them. */
-export const CHAT_COMMANDS = ["reload"] as const;
+export const CHAT_COMMANDS = ["reload", "compact"] as const;
 
 /** A parsed `!name arg…` message. */
 export interface ChatCommand {
@@ -33,8 +33,15 @@ export function parseChatCommand(text: string): ChatCommand | null {
   return { name: match[1].toLowerCase(), arg: (match[2] ?? "").trim() };
 }
 
-/** Whether a message asks the bridge to reload the pi runtime. */
-export function isReloadCommand(text: string): boolean {
+/**
+ * The bridge command a message names, or null when the message is for the agent.
+ *
+ * Only names listed in CHAT_COMMANDS are intercepted: any other `/` or `!` text
+ * is ordinary conversation and must reach the model.
+ */
+export function chatCommandName(text: string): (typeof CHAT_COMMANDS)[number] | null {
   const command = parseChatCommand(text);
-  return command !== null && (CHAT_COMMANDS as readonly string[]).includes(command.name);
+  if (!command) return null;
+  const known = CHAT_COMMANDS.find((name) => name === command.name);
+  return known ?? null;
 }

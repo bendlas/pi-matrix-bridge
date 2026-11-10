@@ -140,6 +140,24 @@ export interface AskQuestion {
  * unambiguous, and the option *value* is shown only when it differs from the
  * label — the model sees values, the user reads labels.
  */
+/**
+ * One-line context usage, e.g. "42.1k / 200k (21%)".
+ *
+ * Tokens are null right after a compaction, before the next response reports
+ * them, so say that instead of printing NaN.
+ */
+export function formatContextUsage(usage: {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}): string {
+  const window = usage.contextWindow.toLocaleString("en-US");
+  if (usage.tokens === null) return `unknown until the next response (window ${window})`;
+  const tokens = usage.tokens.toLocaleString("en-US");
+  const percent = usage.percent === null ? "?" : Math.round(usage.percent);
+  return `${tokens} / ${window} (${percent}%)`;
+}
+
 export function formatAskQuestions(ask: { questions: AskQuestion[] }): string {
   const questions = ask.questions ?? [];
   const count = questions.length;

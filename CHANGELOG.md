@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `!compact` over chat compacts the context and reports usage before and after
+  (`42,100 / 200,000 (21%)`), deferring to `agent_settled` when a turn is running
+  because compacting mid-request races the running call. Tokens are unknown right
+  after a compaction, which is stated rather than printed as NaN.
 - `!reload` over chat reloads the pi runtime (extensions, skills, prompts). It is
   dispatched as the `bridge-reload` command: immediately when the agent is idle,
   otherwise from `agent_settled`, because pi cannot reload mid-turn. Requires

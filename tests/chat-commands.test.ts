@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHAT_COMMANDS, isReloadCommand, parseChatCommand } from '../src/chat-commands.js';
+import { CHAT_COMMANDS, chatCommandName, parseChatCommand } from '../src/chat-commands.js';
 
 describe('parseChatCommand', () => {
   it('parses both prefixes and normalises the name', () => {
@@ -30,15 +30,23 @@ describe('parseChatCommand', () => {
   });
 });
 
-describe('isReloadCommand', () => {
+describe('chatCommandName', () => {
   it('accepts the bridge commands only', () => {
-    expect(isReloadCommand('!reload')).toBe(true);
-    expect(isReloadCommand('/reload')).toBe(true);
-    expect(isReloadCommand('!help')).toBe(false);
-    expect(isReloadCommand('reload')).toBe(false);
+    expect(chatCommandName('!reload')).toBe('reload');
+    expect(chatCommandName('/reload')).toBe('reload');
+    expect(chatCommandName('!compact')).toBe('compact');
+    expect(chatCommandName('/compact')).toBe('compact');
+  });
+
+  it('leaves everything else to the agent', () => {
+    expect(chatCommandName('!help')).toBeNull(); // handled by the auth layer
+    expect(chatCommandName('!verify start X')).toBeNull(); // handled by the transport
+    expect(chatCommandName('reload')).toBeNull(); // no prefix: plain text
+    expect(chatCommandName('!reboot')).toBeNull(); // not a command we own
   });
 
   it('documents what it handles', () => {
     expect(CHAT_COMMANDS).toContain('reload');
+    expect(CHAT_COMMANDS).toContain('compact');
   });
 });

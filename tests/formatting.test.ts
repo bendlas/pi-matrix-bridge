@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractThinkingFromMessage,
   formatAskQuestions,
+  formatContextUsage,
   extractToolResultText,
   fencedCode,
   formatThinking,
@@ -268,7 +269,21 @@ describe('formatToolCalls', () => {
     });
   });
 
-  describe('formatAskQuestions', () => {
+  describe('formatContextUsage', () => {
+  it('prints tokens, window and rounded percent', () => {
+    expect(formatContextUsage({ tokens: 42100, contextWindow: 200000, percent: 21.05 })).toBe(
+      '42,100 / 200,000 (21%)'
+    );
+  });
+
+  it('says when tokens are unknown instead of printing NaN', () => {
+    expect(formatContextUsage({ tokens: null, contextWindow: 200000, percent: null })).toBe(
+      'unknown until the next response (window 200,000)'
+    );
+  });
+});
+
+describe('formatAskQuestions', () => {
     it('renders questions, lettered options and the value only when it differs', () => {
       const text = formatAskQuestions({
         questions: [

@@ -410,6 +410,7 @@ _Commands accept either a \`/\` or \`!\` prefix (e.g. \`/help\` or \`!help\`)._
 • \`/togglethinking\` — Toggle live thinking (💭) visibility
 • \`/session\` — Show current session info (model, context, status)
 • \`/reload\` — Reload extensions, skills and prompts (waits for the current turn)
+• \`/compact\` — Compact the context (waits for the current turn)
 • \`/shutdown\` — Stop pi (restarts into a fresh session under systemd)
 
 *Any authorized user:*
