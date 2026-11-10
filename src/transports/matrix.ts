@@ -1,26 +1,33 @@
-import type { ILogger } from "matrix-bot-sdk";
 import {
-  AutojoinRoomsMixin,
-  LogService,
-  MatrixClient,
-  RustSdkCryptoStorageProvider,
-  RustSdkCryptoStoreType,
-  SimpleFsStorageProvider,
-} from "matrix-bot-sdk";
+  ClientEvent,
+  createClient,
+  type MatrixClient,
+  type MatrixEvent,
+  MemoryStore,
+  type Room,
+  RoomEvent,
+} from "matrix-js-sdk";
+import type { RoomMessageEventContent } from "matrix-js-sdk/lib/@types/events.js";
+import type { Logger } from "matrix-js-sdk/lib/logger.js";
+import { SyncState } from "matrix-js-sdk/lib/sync.js";
 import * as os from "os";
 import * as path from "path";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
 import type { ExternalMessage } from "../types.js";
+import { CRYPTO_DB_PREFIX, CryptoStoreSnapshotter, restoreCryptoStore } from "./crypto-store.js";
 import type { ITransportProvider } from "./interface.js";
 import {
   extractUsername,
   formatForMatrix,
   getRetryAfterMs,
+  parseVerifyCommand,
   RATE_LIMIT_NOTE,
   shouldSkipEvent,
   stripBotMention,
   wasBotMentioned,
 } from "./matrix-utils.js";
+import { getSecretStorageKey } from "./secret-storage.js";
+import { VerificationManager, logVerification, type VerificationNotify, type VerificationSummary } from "./verification.js";
 
 /** One queued outbound request (new message or in-place edit). */
 interface OutboundJob {
@@ -38,36 +45,88 @@ interface OutboundJob {
 /** Give up on a single job after this many rate-limited retries. */
 const MAX_SEND_ATTEMPTS = 10;
 
+/** Snapshot the crypto store at most this often while syncing. */
+const CRYPTO_SNAPSHOT_DEBOUNCE_MS = 5000;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// matrix-bot-sdk logs to the console, which corrupts pi's interactive TUI (the
-// crypto/sync logs land mid-render, e.g. eating an incoming message). Silence it
-// entirely — real connection failures still throw from client.start() and are
-// surfaced via the transport error handler / connect() rejection.
-const SILENT_LOGGER: ILogger = {
+// matrix-js-sdk logs to the console, which corrupts pi's interactive TUI (the
+// sync/crypto logs land mid-render, e.g. eating an incoming message). Silence it
+// entirely — real connection failures still surface via the transport error
+// handler / connect() rejection.
+const SILENT_LOGGER: Logger = {
+  trace: () => {},
+  debug: () => {},
   info: () => {},
   warn: () => {},
-  debug: () => {},
-  trace: () => {},
   error: () => {},
+  getChild: () => SILENT_LOGGER,
 };
 
 /**
- * Matrix transport provider using matrix-bot-sdk
- * Works with any Matrix homeserver — Element X, Element Web, FluffyChat, etc.
+ * Logger for the client: silent on the console (pi's TUI), but verification
+ * lines — including matrix-sdk-crypto's own tracing, which reaches us through
+ * this logger — are appended to the verification log. That exposes the Rust
+ * state machine's view of the SAS/MAC exchange, including contents of events
+ * *we* send, which the to-device trace can only see after encryption.
+ */
+function verificationTracingLogger(): Logger {
+  const render = (part: unknown): string => {
+    if (typeof part === "string") return part;
+    try {
+      return JSON.stringify(part);
+    } catch {
+      return String(part);
+    }
+  };
+  const capture = (...msg: unknown[]): void => {
+    // "OlmMachine" would match a naive /mac/ filter and flood the log.
+    const text = msg.map(render).join(" ").replace(/machine/gi, "mchn");
+    if (!/verif|sas|mac/i.test(text)) return;
+    logVerification(`rust ${text.length > 900 ? `${text.slice(0, 900)}…` : text}`);
+  };
+  const logger: Logger = {
+    trace: capture,
+    debug: capture,
+    info: capture,
+    warn: capture,
+    error: capture,
+    getChild: () => logger,
+  };
+  return logger;
+}
+
+/** Bridge data files under ~/.pi */
+const STORAGE_DIR = path.join(os.homedir(), ".pi");
+const CRYPTO_SNAPSHOT_PATH = path.join(STORAGE_DIR, "matrix-bridge-crypto.json");
+
+/**
+ * Matrix transport provider using matrix-js-sdk (Rust/WASM crypto).
+ *
+ * matrix-bot-sdk's Node crypto bindings cannot do interactive verification, so
+ * the transport runs on matrix-js-sdk to get SAS device verification. The Rust
+ * crypto store lives in an in-process IndexedDB (fake-indexeddb) that we
+ * snapshot to disk — see crypto-store.ts.
  */
 export class MatrixProvider implements ITransportProvider {
   readonly type = "matrix";
   private client?: MatrixClient;
   private _isConnected = false;
   private messageHandler?: (message: ExternalMessage) => void;
+  /** Last room we received a message in — used to surface TUI-only output in chat. */
+  private lastChatId?: string;
   private errorHandler?: (error: Error) => void;
   private botUserId?: string;
+  private botDeviceId?: string;
   private joinedRooms = new Set<string>();
   private roomMemberCount = new Map<string, number>();
+  private autoJoinAttempted = new Set<string>();
   private connectedAt = 0;
+  private cryptoStore?: CryptoStoreSnapshotter;
+  private verification?: VerificationManager;
+  private verificationNotify?: VerificationNotify;
 
   // Serialized outbound queue. Every send/edit goes through it so a 429 backs off
   // and retries instead of dropping the message. `rateLimitedUntil` is a global
@@ -80,20 +139,25 @@ export class MatrixProvider implements ITransportProvider {
 
   constructor(
     private config: { homeserverUrl: string; accessToken: string; encryption?: boolean },
-    private auth: ChallengeAuth
+    private auth: ChallengeAuth,
   ) {}
 
   get isConnected(): boolean {
     return this._isConnected;
   }
 
-  // Formatting delegated to matrix-utils.ts (pure, testable)
+  /** Device ID of this bridge session (available once connected). */
+  get deviceId(): string | undefined {
+    return this.botDeviceId;
+  }
+
+  /** Whether E2EE (and therefore verification) is active. */
+  get encryptionEnabled(): boolean {
+    return !!this.verification;
+  }
 
   async connect(): Promise<void> {
     if (this._isConnected) return;
-
-    // Silence the SDK before any client activity so it never writes to the TUI.
-    LogService.setLogger(SILENT_LOGGER);
 
     const { homeserverUrl, accessToken } = this.config;
 
@@ -101,90 +165,130 @@ export class MatrixProvider implements ITransportProvider {
       throw new Error("Matrix homeserver URL and access token required");
     }
 
-    const storagePath = path.join(
-      os.homedir(),
-      ".pi",
-      "matrix-bridge-store.json"
-    );
-    const storage = new SimpleFsStorageProvider(storagePath);
-
-    // Set up E2EE crypto storage if encryption is enabled.
-    // Uses @matrix-org/matrix-sdk-crypto-nodejs (native Rust, SQLite on disk).
-    // Crypto state persists across restarts — same device, same keys.
-    // The device must be verified once from another Matrix client (Element, etc).
-    let cryptoProvider: RustSdkCryptoStorageProvider | undefined;
-    if (this.config.encryption !== false) {
-      try {
-        const cryptoStorePath = path.join(
-          os.homedir(),
-          ".pi",
-          "matrix-bridge-crypto"
+    // The access token must be bound to a device: crypto needs a stable device
+    // ID, and minting a token from an existing client shares its device (which
+    // breaks E2EE). Ask the server who we are before creating the crypto client.
+    const probe = createClient({ baseUrl: homeserverUrl, accessToken, logger: SILENT_LOGGER });
+    let userId: string;
+    let deviceId: string;
+    try {
+      const who = await probe.whoami();
+      if (!who.user_id || !who.device_id) {
+        throw new Error(
+          who.user_id
+            ? "This access token is not bound to a device — mint a fresh token via /login (see README)."
+            : "Could not determine the account for this access token.",
         );
-        cryptoProvider = new RustSdkCryptoStorageProvider(cryptoStorePath, RustSdkCryptoStoreType.Sqlite);
-      } catch {
-        // E2EE crypto unavailable — continue without encryption.
       }
+      userId = who.user_id;
+      deviceId = who.device_id;
+    } finally {
+      probe.stopClient();
     }
 
-    this.client = new MatrixClient(
-      homeserverUrl,
+    const encryptionEnabled = this.config.encryption !== false;
+    const client = createClient({
+      baseUrl: homeserverUrl,
       accessToken,
-      storage,
-      cryptoProvider
-    );
-
-    // Auto-join rooms the bot is invited to
-    AutojoinRoomsMixin.setupOnClient(this.client);
-
-    // Cache bot user ID (never changes)
-    this.botUserId = await this.client.getUserId();
-
-    // Track room membership and member counts
-    this.client.on("room.join", (roomId: string) => {
-      this.joinedRooms.add(roomId);
-      // Refresh member count asynchronously
-      this.client?.getJoinedRoomMembers(roomId)
-        .then(members => this.roomMemberCount.set(roomId, members.length))
-        .catch(() => {});
-    });
-    this.client.on("room.leave", (roomId: string) => {
-      this.joinedRooms.delete(roomId);
-      this.roomMemberCount.delete(roomId);
+      userId,
+      deviceId,
+      store: new MemoryStore(),
+      logger: verificationTracingLogger(),
+      verificationMethods: ["m.sas.v1"],
+      // Only consulted for `/verify sign` (cross-signing from secret storage);
+      // returning null keeps everything else offline from the recovery key.
+      cryptoCallbacks: { getSecretStorageKey },
     });
 
-    // Handle incoming messages
-    this.client.on("room.message", async (roomId: string, event: any) => {
-      try {
-        await this.handleMessage(roomId, event);
-      } catch (err) {
-        if (this.errorHandler) {
-          this.errorHandler(err as Error);
-        }
-      }
-    });
+    // Register handlers before starting so no early event is missed.
+    this.client = client;
+    this.botUserId = userId;
+    this.botDeviceId = deviceId;
+
+    client.on(RoomEvent.Timeline, this.onTimeline);
+    client.on(ClientEvent.Sync, this.onSync);
 
     try {
-      await this.client.start();
+      if (encryptionEnabled) {
+        // Restore the crypto store *before* the Rust machine opens it, otherwise
+        // it generates new device keys (which un-verifies the device).
+        await restoreCryptoStore(CRYPTO_SNAPSHOT_PATH);
+        await client.initRustCrypto({
+          useIndexedDB: true,
+          cryptoDatabasePrefix: CRYPTO_DB_PREFIX,
+        });
+        this.cryptoStore = new CryptoStoreSnapshotter(
+          CRYPTO_SNAPSHOT_PATH,
+          CRYPTO_SNAPSHOT_DEBOUNCE_MS,
+          (err) => this.errorHandler?.(new Error(`Crypto store snapshot failed: ${err.message}`)),
+        );
+        // Capture the freshly-created account keys right away.
+        this.cryptoStore.schedule();
+      }
+
+      // No persisted sync token on purpose: the room store is in-memory, and an
+      // incremental sync without full room state would make us send unencrypted
+      // messages into encrypted rooms. An initial sync with state is cheap.
+      await client.startClient({ initialSyncLimit: 0 });
+      // Do not report connected (or send anything) until the initial sync has
+      // loaded room state — sending into an encrypted room before the
+      // m.room.encryption state event is known would go out in plaintext.
+      await this.waitForInitialSync(client);
+
+      const crypto = client.getCrypto();
+      if (crypto) {
+        this.verification = new VerificationManager(client, crypto, (message, level) => {
+          this.verificationNotify?.(message, level);
+          // Also deliver to the chat: device verification is driven from the
+          // other client (Element), so the emoji must be visible there too.
+          // `lastChatId` is only known once a message has been received, so
+          // right after a reload the emoji message had no destination and was
+          // dropped silently — which made the emoji impossible to compare. Fall
+          // back to a joined room and log failures instead of swallowing them.
+          const chatId = this.lastChatId ?? this.fallbackVerificationRoomId(client);
+          if (!chatId) {
+            logVerification("notify dropped: no room available to deliver verification messages");
+            return;
+          }
+          void this.sendMessage(chatId, message).catch((err: unknown) => {
+            logVerification(`notify delivery to ${chatId} failed: ${(err as Error).message}`);
+          });
+        });
+        this.verification.start();
+      }
+
+      // Seed joined rooms and member count caches
+      const { joined_rooms: rooms } = await client.getJoinedRooms();
+      this.joinedRooms = new Set(rooms);
+      await Promise.all(
+        rooms.map(async (roomId) => {
+          try {
+            const members = await client.getJoinedRoomMembers(roomId);
+            this.roomMemberCount.set(roomId, Object.keys(members.joined).length);
+          } catch {
+            // Will be fetched on first message if needed
+          }
+        }),
+      );
+
+      client.on(RoomEvent.MyMembership, (room: Room, membership: string) => {
+        if (membership === "join") {
+          this.joinedRooms.add(room.roomId);
+          void client
+            .getJoinedRoomMembers(room.roomId)
+            .then((members) => this.roomMemberCount.set(room.roomId, Object.keys(members.joined).length))
+            .catch(() => {});
+        } else {
+          this.joinedRooms.delete(room.roomId);
+          this.roomMemberCount.delete(room.roomId);
+        }
+      });
     } catch (error) {
       // Clean up dangling state so connect() can be retried
-      this.client = undefined;
-      this.botUserId = undefined;
-      this.joinedRooms.clear();
-      this.roomMemberCount.clear();
+      await this.teardown();
       throw error;
     }
 
-    // Seed joined rooms and member count caches
-    const rooms = await this.client.getJoinedRooms();
-    this.joinedRooms = new Set(rooms);
-    await Promise.all(rooms.map(async (roomId) => {
-      try {
-        const members = await this.client!.getJoinedRoomMembers(roomId);
-        this.roomMemberCount.set(roomId, members.length);
-      } catch {
-        // Will be fetched on first message if needed
-      }
-    }));
     this.connectedAt = Date.now();
     this._isConnected = true;
   }
@@ -201,14 +305,179 @@ export class MatrixProvider implements ITransportProvider {
       job.reject(new Error("Matrix transport disconnected"));
     }
 
-    this.client.stop();
+    await this.teardown();
+  }
+
+  /** Stop crypto/verification/sync and release all per-connection state. */
+  private async teardown(): Promise<void> {
+    this.verification?.dispose();
+    this.verification = undefined;
+
+    // Final crypto snapshot before the in-memory store vanishes.
+    if (this.cryptoStore) {
+      this.cryptoStore.schedule();
+      await this.cryptoStore.close();
+      this.cryptoStore = undefined;
+    }
+
+    const client = this.client;
+    if (client) {
+      client.off(RoomEvent.Timeline, this.onTimeline);
+      client.off(ClientEvent.Sync, this.onSync);
+      try {
+        client.stopClient();
+      } catch {
+        // already stopped
+      }
+    }
+
     this._isConnected = false;
     this.client = undefined;
     this.botUserId = undefined;
+    this.botDeviceId = undefined;
     this.joinedRooms.clear();
     this.roomMemberCount.clear();
+    this.autoJoinAttempted.clear();
     this.connectedAt = 0;
   }
+
+  /* ---------------------------------------------------------------------- */
+  /* verification                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  /** Register a handler for verification progress (emoji, completion, errors). */
+  onVerificationNotification(handler: VerificationNotify): void {
+    this.verificationNotify = handler;
+  }
+
+  /**
+   * Handle `/verify …` from the chat. Returns nothing; replies into the room.
+   * Kept off the agent path so the SAS handshake does not depend on a model turn.
+   */
+  private async handleVerifyCommand(text: string, chatId: string): Promise<void> {
+    const manager = this.verification;
+    const command = parseVerifyCommand(text);
+    if (!manager || !command) return;
+
+    const reply = async (message: string): Promise<void> => {
+      await this.sendMessage(chatId, message).catch(() => {});
+    };
+
+    try {
+      switch (command.action) {
+        case "list": {
+          const pending = manager.list();
+          if (pending.length === 0) {
+            await reply(
+              [
+                "No device verification in progress.",
+                `Bridge device: ${this.deviceId ?? "unknown"}`,
+                "Start one in Element: Settings → Sessions → select the bridge session → Verify.",
+              ].join("\n"),
+            );
+            return;
+          }
+          const lines = ["━━━ Pending verifications ━━━"];
+          for (const entry of pending) {
+            lines.push(`${entry.id}  ${entry.userId} ${entry.deviceId ?? ""}  [${entry.phase}]`);
+            if (entry.emoji?.length) lines.push(`  emoji: ${entry.emoji.join(" ")}`);
+            if (entry.decimal?.length) lines.push(`  numbers: ${entry.decimal.join(" ")}`);
+          }
+          lines.push(
+            "",
+            "Match?  /verify accept <id>   No match?  /verify mismatch <id>",
+            "Nothing pending?  /verify start <deviceId>  initiates from the bridge.",
+            "SAS keeps failing?  /verify sign <deviceId>  cross-signs directly (recovery key file).",
+            "SAS times out?  /verify auto on  accepts the emoji automatically (compare them yourself!).",
+          );
+          await reply(lines.join("\n"));
+          return;
+        }
+        case "start":
+          if (!command.id) return await reply("Usage: /verify start <deviceId> (e.g. /verify start daZejMzfih)");
+          await manager.request(command.id);
+          return;
+        case "auto": {
+          const value = (command.id ?? "").toLowerCase();
+          if (value !== "on" && value !== "off") return await reply("Usage: /verify auto on|off");
+          manager.setAutoConfirm(value === "on");
+          return;
+        }
+        case "sign":
+          if (!command.id) return await reply("Usage: /verify sign <deviceId> (e.g. /verify sign CONTOXFROGBOT)");
+          await manager.crossSignOwnDevice(command.id);
+          return;
+        case "accept":
+          if (!command.id) return await reply("Usage: /verify accept <id>");
+          await manager.accept(command.id);
+          return;
+        case "mismatch":
+          if (!command.id) return await reply("Usage: /verify mismatch <id>");
+          await manager.mismatch(command.id);
+          return;
+        case "cancel":
+          if (!command.id) return await reply("Usage: /verify cancel <id>");
+          await manager.cancel(command.id);
+          return;
+      }
+    } catch (err) {
+      await reply(`❌ ${(err as Error).message}`);
+    }
+  }
+
+  listVerifications(): VerificationSummary[] {
+    return this.verification?.list() ?? [];
+  }
+
+  /** Enable/disable automatic SAS confirmation (`/matrix-bridge verify auto on`). */
+  setVerificationAutoConfirm(enabled: boolean): void {
+    this.requireVerification().setAutoConfirm(enabled);
+  }
+
+  /** Start verification from the bridge side (`/matrix-bridge verify start <device>`). */
+  async startVerification(deviceId: string): Promise<string> {
+    return await this.requireVerification().request(deviceId);
+  }
+
+  /** Cross-sign one of our own devices without SAS (`/matrix-bridge verify sign <device>`). */
+  async crossSignDevice(deviceId: string): Promise<void> {
+    await this.requireVerification().crossSignOwnDevice(deviceId);
+  }
+
+  async acceptVerification(id: string): Promise<void> {
+    await this.requireVerification().accept(id);
+  }
+
+  async mismatchVerification(id: string): Promise<void> {
+    await this.requireVerification().mismatch(id);
+  }
+
+  async cancelVerification(id: string): Promise<void> {
+    await this.requireVerification().cancel(id);
+  }
+
+  /**
+   * Somewhere to post verification messages before the user has spoken in a
+   * room: prefer an encrypted room (verification needs E2EE), else any joined.
+   */
+  private fallbackVerificationRoomId(client: MatrixClient): string | undefined {
+    const rooms = client.getRooms?.() ?? [];
+    const encrypted = rooms.find((room) => room.hasEncryptionStateEvent?.());
+    return (encrypted ?? rooms[0])?.roomId;
+  }
+
+  private requireVerification(): VerificationManager {
+    if (!this.verification) {
+      throw new Error(
+        "Verification is unavailable — E2EE is disabled or the bridge is not connected.",
+      );
+    }
+    return this.verification;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* outbound                                                               */
+  /* ---------------------------------------------------------------------- */
 
   async sendMessage(chatId: string, text: string): Promise<string> {
     if (!this.client) {
@@ -232,15 +501,21 @@ export class MatrixProvider implements ITransportProvider {
    */
   private enqueue(spec: Pick<OutboundJob, "kind" | "chatId" | "text" | "messageId">): Promise<string> {
     if (spec.kind === "edit") {
-      const pending = this.findCoalescableEdit(spec.chatId, spec.messageId);
-      if (pending) {
-        pending.text = spec.text;
+      const pendingUpdate = this.findCoalescableEdit(spec.chatId, spec.messageId);
+      if (pendingUpdate) {
+        pendingUpdate.text = spec.text;
         return new Promise((resolve, reject) => {
           // Ride along with the existing job's outcome.
-          const prevResolve = pending.resolve;
-          const prevReject = pending.reject;
-          pending.resolve = (id) => { prevResolve(id); resolve(id); };
-          pending.reject = (err) => { prevReject(err); reject(err); };
+          const prevResolve = pendingUpdate.resolve;
+          const prevReject = pendingUpdate.reject;
+          pendingUpdate.resolve = (id) => {
+            prevResolve(id);
+            resolve(id);
+          };
+          pendingUpdate.reject = (err) => {
+            prevReject(err);
+            reject(err);
+          };
         });
       }
     }
@@ -303,7 +578,15 @@ export class MatrixProvider implements ITransportProvider {
 
   /** Perform the actual SDK call for a single queued job. */
   private async dispatch(job: OutboundJob): Promise<string> {
-    if (!this.client) throw new Error("Matrix client not connected");
+    const client = this.client;
+    if (!client) throw new Error("Matrix client not connected");
+
+    // Refuse to send into a room we have no state for: matrix-js-sdk decides
+    // whether to encrypt from the room's m.room.encryption state, so sending
+    // before state is loaded could leak plaintext into an encrypted room.
+    if (!client.getRoom(job.chatId)) {
+      throw new Error(`Room ${job.chatId} is not ready (room state not loaded yet)`);
+    }
 
     if (job.kind === "send") {
       let text = job.text;
@@ -312,14 +595,16 @@ export class MatrixProvider implements ITransportProvider {
         this.rateLimitNotePending = false;
       }
       const { body, formattedBody } = formatForMatrix(text);
-      return await this.client.sendMessage(job.chatId, {
+      const content = {
         msgtype: "m.text",
         body,
         ...(formattedBody && {
           format: "org.matrix.custom.html",
           formatted_body: formattedBody,
         }),
-      });
+      } as RoomMessageEventContent;
+      const res = await client.sendMessage(job.chatId, content);
+      return res.event_id;
     }
 
     const { body, formattedBody } = formatForMatrix(job.text);
@@ -334,21 +619,21 @@ export class MatrixProvider implements ITransportProvider {
 
     // m.replace edit. The top-level body carries the "* " fallback shown by
     // clients that don't render edits; m.new_content holds the real replacement.
-    await this.client.sendEvent(job.chatId, "m.room.message", {
+    const res = await client.sendMessage(job.chatId, {
       ...newContent,
       body: `* ${body}`,
       ...(formattedBody && { formatted_body: `* ${formattedBody}` }),
       "m.new_content": newContent,
       "m.relates_to": { rel_type: "m.replace", event_id: job.messageId },
-    });
-    return "";
+    } as RoomMessageEventContent);
+    return res.event_id ?? "";
   }
 
   async sendTyping(chatId: string): Promise<void> {
     // Don't pile typing requests onto a server that's already rate-limiting us.
     if (!this.client || this.rateLimitedUntil > Date.now()) return;
     try {
-      await this.client.setTyping(chatId, true, 10000);
+      await this.client.sendTyping(chatId, true, 10000);
     } catch {
       // Ignore typing indicator errors
     }
@@ -357,7 +642,7 @@ export class MatrixProvider implements ITransportProvider {
   async stopTyping(chatId: string): Promise<void> {
     if (!this.client || this.rateLimitedUntil > Date.now()) return;
     try {
-      await this.client.setTyping(chatId, false);
+      await this.client.sendTyping(chatId, false, 0);
     } catch {
       // Ignore typing indicator errors
     }
@@ -371,26 +656,119 @@ export class MatrixProvider implements ITransportProvider {
     this.errorHandler = handler;
   }
 
-  private async handleMessage(roomId: string, event: any): Promise<void> {
-    if (!this.client || !this.botUserId) return;
+  /* ---------------------------------------------------------------------- */
+  /* inbound                                                                */
+  /* ---------------------------------------------------------------------- */
+
+  /** Called for every live timeline event (already filtered to room messages). */
+  private onTimeline = (event: MatrixEvent, room?: Room): void => {
+    void this.handleTimelineEvent(event, room).catch((err) => {
+      this.errorHandler?.(err as Error);
+    });
+  };
+
+  /** Snapshot the crypto store after syncs (it changes with almost every sync). */
+  private onSync = (state: SyncState): void => {
+    if (state === SyncState.Syncing || state === SyncState.Prepared || state === SyncState.Catchup) {
+      this.cryptoStore?.schedule();
+      this.autoJoinInvites();
+    }
+  };
+
+  /**
+   * matrix-bot-sdk's AutojoinRoomsMixin has no matrix-js-sdk equivalent, so
+   * join invites ourselves. Called on every sync; joined rooms are skipped and
+   * failures are not retried for the same room.
+   */
+  private autoJoinInvites(): void {
+    const client = this.client;
+    if (!client) return;
+    for (const room of client.getRooms()) {
+      if (room.getMyMembership() !== "invite" || this.autoJoinAttempted.has(room.roomId)) continue;
+      this.autoJoinAttempted.add(room.roomId);
+      client.joinRoom(room.roomId).catch(() => {
+        // Retry after a reconnect, not in a tight loop.
+        this.autoJoinAttempted.delete(room.roomId);
+      });
+    }
+  }
+
+  /** Resolve once the first sync has delivered room state. */
+  private async waitForInitialSync(client: MatrixClient, timeoutMs = 60_000): Promise<void> {
+    const current = client.getSyncState();
+    if (current === SyncState.Prepared || current === SyncState.Syncing) return;
+
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        client.off(ClientEvent.Sync, onSync);
+      };
+      const onSync = (state: SyncState, _prev: SyncState | null, data?: { error?: Error }): void => {
+        if (state === SyncState.Prepared || state === SyncState.Syncing) {
+          cleanup();
+          resolve();
+        } else if (state === SyncState.Error || state === SyncState.Stopped) {
+          cleanup();
+          reject(data?.error ?? new Error("Matrix sync failed"));
+        }
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out waiting for the initial Matrix sync"));
+      }, timeoutMs);
+      timer.unref?.();
+      client.on(ClientEvent.Sync, onSync);
+    });
+  }
+
+  private async handleTimelineEvent(event: MatrixEvent, room?: Room): Promise<void> {
+    const client = this.client;
+    if (!client || !this.botUserId) return;
+
+    const type = event.getType();
+    if (type !== "m.room.message" && type !== "m.room.encrypted") return;
+
+    // Decrypt on demand; the SDK does not pre-decrypt message events. This
+    // resolves immediately for unencrypted events.
+    if (event.isEncrypted()) {
+      await client.decryptEventIfNeeded(event);
+      if (event.isDecryptionFailure()) return; // leave a debug trail? silently skip
+    }
+
+    const content = event.getContent();
+    if (event.getType() !== "m.room.message" || !content) return;
+
+    const roomId = event.getRoomId() ?? room?.roomId;
+    if (!roomId) return;
+
+    // Remote echo of our own send — already handled the local echo.
+    if (event.getUnsigned()?.transaction_id) return;
+
+    const sender = event.getSender() ?? "";
+    // Plain shape reused by the pure, tested filtering helpers.
+    const plainEvent = {
+      sender,
+      origin_server_ts: event.getTs(),
+      content,
+    };
 
     // Pure filter — delegates to testable utility
-    const skipReason = shouldSkipEvent(event, this.botUserId, this.connectedAt, this.joinedRooms, roomId);
+    const skipReason = shouldSkipEvent(plainEvent, this.botUserId, this.connectedAt, this.joinedRooms, roomId);
     if (skipReason) return;
 
     const chatId = roomId;
-    const userId = event.sender; // e.g. @user:matrix.org
-    const username = extractUsername(userId);
-    const messageText = event.content.body;
-    const messageId = event.event_id;
+    this.lastChatId = chatId;
+    const username = extractUsername(sender);
+    const messageText = content.body as string;
+    const messageId = event.getId() ?? "";
 
     // Determine if group chat from cached member count (no API call per message)
     let memberCount = this.roomMemberCount.get(roomId);
     if (memberCount === undefined) {
       // Cache miss — fetch once and cache
       try {
-        const members = await this.client.getJoinedRoomMembers(roomId);
-        memberCount = members.length;
+        const members = await client.getJoinedRoomMembers(roomId);
+        memberCount = Object.keys(members.joined).length;
         this.roomMemberCount.set(roomId, memberCount);
       } catch {
         memberCount = 2; // Default to DM if we can't check
@@ -407,13 +785,13 @@ export class MatrixProvider implements ITransportProvider {
     };
 
     const isAuthorized = await this.auth.checkAuthorization(
-      userId,
+      sender,
       chatId,
       username,
       isGroupChat,
       wasMentioned,
       sendMessageToUser,
-      this.type
+      this.type,
     );
 
     // Handle challenge codes and commands in DMs. Admin commands accept either
@@ -422,21 +800,26 @@ export class MatrixProvider implements ITransportProvider {
       const handled = await this.auth.handleAdminCommand(
         messageText,
         chatId,
-        userId,
+        sender,
         async (text) => {
           await this.sendMessage(chatId, text);
         },
-        this.type
+        this.type,
       );
       if (handled) return;
     }
 
     if (!isAuthorized) return;
 
+    // Device verification driven from chat: /verify [list|accept|mismatch|cancel <id>]
+    if (this.verification && parseVerifyCommand(messageText)) {
+      await this.handleVerifyCommand(messageText, chatId);
+      return;
+    }
+
     // Strip bot mention from message (pure utility)
-    const cleanContent = wasMentioned && this.botUserId
-      ? stripBotMention(messageText, this.botUserId)
-      : messageText;
+    const cleanContent =
+      wasMentioned && this.botUserId ? stripBotMention(messageText, this.botUserId) : messageText;
 
     // Forward to message handler
     if (this.messageHandler && cleanContent) {
@@ -445,8 +828,8 @@ export class MatrixProvider implements ITransportProvider {
         transport: this.type,
         content: cleanContent,
         username,
-        userId,
-        timestamp: new Date(event.origin_server_ts || Date.now()),
+        userId: sender,
+        timestamp: new Date(event.getTs() || Date.now()),
         messageId,
         isGroupChat,
         wasMentioned,
@@ -455,5 +838,4 @@ export class MatrixProvider implements ITransportProvider {
       this.messageHandler(externalMessage);
     }
   }
-
 }

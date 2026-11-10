@@ -16,6 +16,7 @@ Remote users can interact with your pi coding agent via Element, FluffyChat, or 
 - 💾 Persistent config (auth state, auto-connect, widget preference)
 - 🔧 Tool call visibility for remote users
 - 💭 Live streaming — thinking and the response stream into editable messages so you can steer/stop mid-turn
+- 🎨 Matrix-native formatting — fenced code blocks, inline code, spoilers for reasoning, and an `/html` escape hatch
 - ⏳ Rate-limit handling — backs off and retries on Matrix 429s so messages are never silently dropped
 - 📝 Multi-turn conversation support
 - 🔑 Secure permissions (chmod 600 for config files, 700 for directories)
@@ -67,7 +68,27 @@ export PI_MATRIX_BRIDGE_HOMESERVER="https://matrix.org"
 export PI_MATRIX_BRIDGE_ACCESS_TOKEN="syt_..."
 ```
 
-E2EE is **on by default**. Verify the bot's device once from another Matrix client (Element, etc.) — until verified, encrypted rooms can't be decrypted in either direction.
+E2EE is **on by default**. The bot's device is a normal Matrix session, so you can
+verify it from Element (or any client that supports SAS) like any other session:
+
+1. In Element: **Settings → Sessions** (or "Security & Privacy → Sessions"), find the
+   session named with `initial_device_display_name` (e.g. `pi-matrix-bridge`) and
+   choose **Verify session**.
+2. The bridge auto-accepts and shows 7 emoji in your pi terminal (and, as a fallback,
+   numbers). Compare them with what Element shows.
+3. If they match: `/matrix-bridge verify accept <id>` in pi (the id is in the emoji
+   message, or run `/matrix-bridge verify` to list pending verifications). If they
+   don't: `/matrix-bridge verify mismatch <id>`.
+
+Both sides must confirm for verification to complete, so the bridge never confirms
+on its own — you are the one comparing the emoji. Once verified, the session shows
+as verified/cross-signed in Element and room keys are shared normally.
+
+> **Verification and the crypto store.** The device's identity keys live in
+> `~/.pi/matrix-bridge-crypto.json` (mode 0600 — it holds room keys). Keep that file:
+> if it is deleted, the bridge generates new keys for the same device on the next
+> start and you have to verify the session again. See
+> [Crypto store](#crypto-store) in Troubleshooting.
 
 Set `"encryption": false` in the `matrix` config to disable — useful for non-encrypted rooms only, or to bypass crypto-store/server desync (e.g. `M_UNKNOWN: One time key … already exists`). **Caveat:** with E2EE off, the homeserver sees plaintext, and the bot can't participate in encrypted rooms at all.
 
@@ -93,6 +114,10 @@ The user enters the code in the bot chat to become a trusted user.
 | `/matrix-bridge connect` | Connect to Matrix |
 | `/matrix-bridge disconnect` | Disconnect from Matrix |
 | `/matrix-bridge configure matrix <homeserver-url> <access-token>` | Set Matrix credentials via CLI |
+| `/matrix-bridge verify` | List pending device verifications (emoji/numeric SAS) |
+| `/matrix-bridge verify accept <id>` | Confirm the SAS values matched — completes verification |
+| `/matrix-bridge verify mismatch <id>` | Report that the SAS values did not match |
+| `/matrix-bridge verify cancel <id>` | Abort a verification |
 | `/matrix-bridge widget` | Toggle status widget on/off |
 | `/matrix-bridge toggletools` | Toggle tool call visibility in remote messages |
 | `/matrix-bridge togglethinking` | Toggle live thinking (💭) visibility |
@@ -125,7 +150,18 @@ Any authorized user (not just admins) can also send:
 
 Both the model's **thinking** (💭) and its **response** stream into messages that are edited in place (token-by-token, throttled) as they're generated — so you can read where a turn is heading and `stop` (or steer) before it commits to a wrong action. Each **tool call** (🔧) appears the moment it starts running (handy for tools that take a few seconds), and its **output** (↳, truncated) is appended when it finishes. The typing indicator stays active alongside them.
 
-Thinking is **on by default** — toggle with `/togglethinking` (DM admin) or `/matrix-bridge togglethinking`, or set `"hideThinking": true` in the config. (The response always streams.)
+Thinking is **on by default** — toggle with `/togglethinking` (DM admin) or `/matrix-bridge togglethinking`, or set `"hideThinking": true` in the config. (The response always streams.) Reasoning is wrapped in a Matrix **spoiler**, so it stays collapsed in Element until tapped — the answer doesn't get buried under long reasoning.
+
+## Formatting
+
+Messages are sent as Matrix `m.text` with a `formatted_body` (`org.matrix.custom.html`), so clients render real formatting instead of raw markdown:
+
+- **Code blocks** — ```` ```lang ```` fences become `<pre><code class="language-lang">`. An unterminated fence (a block still being streamed) renders as code up to the end of the message, so it doesn't flash raw backticks. Fences longer than three backticks work, and embedded fences are preserved.
+- **Inline code** — `` `x` `` becomes `<code>`.
+- **Bold / italic / links** — `**bold**`, `*italic*`, `[text](url)`.
+- **Spoilers** — `||hidden||` becomes Matrix's native `<span data-mx-spoiler>` (tap to reveal). Used for the model's 💭 reasoning.
+- **Tool output** — multi-line tool output is wrapped in a fence (the fence grows past any backticks in the output), so indentation, diffs and markdown-ish characters stay literal.
+- **Raw HTML** — ordinary text is HTML-escaped, so `<tag>` stays visible. To send arbitrary Matrix HTML, start the message with `/html` on its own line (or `/html <p>…</p>`); the rest is passed through as `formatted_body` verbatim, with a tag-stripped plain-text fallback as `body`. Useful for formatting the bridge doesn't translate (tables, headings, `<hr>`, custom spoilers).
 
 ## Rate-limit handling
 
@@ -170,12 +206,31 @@ Environment variables override file config:
 
 ## Troubleshooting
 
+### Crypto store
+
+The Rust crypto store is kept in-process and snapshotted to
+`~/.pi/matrix-bridge-crypto.json` (mode 0600) every few seconds while the bridge is
+connected, plus on disconnect. That file is what keeps the device's identity keys,
+verification/trust state, and megolm sessions stable across restarts.
+
+- **Upgrading from 0.5.x:** the old native store (`~/.pi/matrix-bridge-crypto/`,
+  `~/.pi/matrix-bridge-store.json`) is no longer used. The bridge device keeps its
+  device ID but gets new identity keys, so verify the session once more, and revoke
+  the stale device in Element (**Settings → Sessions → log out**). You can then
+  delete the old files.
+- **Reset:** delete `~/.pi/matrix-bridge-crypto.json` to start from a clean crypto
+  store. The device is then unverified and needs verifying again.
+- **Corrupt snapshot:** startup fails with a clear error instead of silently
+  generating new keys (which would un-verify the device without warning). Delete the
+  file to recover.
+- **Backups:** the snapshot contains your room keys — treat it like a session token.
+
 **`⚠️ Matrix setup error: M_UNKNOWN: One time key signed_curve25519:… already exists`**
 
 The bot's crypto store has drifted out of sync with the homeserver (the device's one-time keys no longer match).
 
 1. Stop `pi`
-2. Delete your old pi matrix crypto storage `rm ~/.pi/matrix-bridge-crypto ~/.pi/matrix-bridge-store.json -r`
+2. Delete the crypto store snapshot: `rm ~/.pi/matrix-bridge-crypto.json`
 3. Mint a **fresh access token / device** and reconfigure with it:
 
 ```bash
@@ -189,7 +244,7 @@ curl -XPOST 'https://matrix.org/_matrix/client/v3/login' \
   }'
 ```
 
-Then set the new `access_token` (via `/matrix-bridge configure matrix <homeserver> <token>` or `PI_MATRIX_BRIDGE_ACCESS_TOKEN`) and reconnect. Deleting the stale crypto store (`~/.pi/matrix-bridge-crypto`) before reconnecting also clears it — the bot's device will then need re-verifying. Alternatively, set `"encryption": false` in the `matrix` config to bypass E2EE entirely (the homeserver then sees plaintext).
+Then set the new `access_token` (via `/matrix-bridge configure matrix <homeserver> <token>` or `PI_MATRIX_BRIDGE_ACCESS_TOKEN`) and reconnect, and verify the new session (`/matrix-bridge verify`). Alternatively, set `"encryption": false` in the `matrix` config to bypass E2EE entirely (the homeserver then sees plaintext).
 
 ## Architecture
 

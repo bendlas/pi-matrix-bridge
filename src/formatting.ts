@@ -21,6 +21,19 @@ export function extractThinkingFromMessage(message: AssistantMessage): string {
 }
 
 /**
+ * Render reasoning as a Matrix spoiler (`||…||` → `<span data-mx-spoiler>`),
+ * collapsed in Element until tapped, so long reasoning doesn't bury the answer.
+ */
+export function formatThinking(thinking: string): string {
+  const trimmed = thinking.trim();
+  if (!trimmed) return "";
+  // Split any `||` in the reasoning (e.g. a JS `a || b`) with a zero-width
+  // space so it can't terminate the wrapping spoiler early.
+  const body = trimmed.replace(/\|\|/g, "|\u200b|");
+  return `💭 ||${body}||`;
+}
+
+/**
  * Check if assistant message contains tool calls (more turns will follow).
  */
 export function hasToolCalls(message: AssistantMessage): boolean {
@@ -72,13 +85,27 @@ export function extractToolResultText(result: any): string {
 }
 
 /**
+ * Wrap text in a fenced code block. The fence grows past any backtick run in
+ * the text, so output that itself contains ``` fences stays literal.
+ */
+export function fencedCode(text: string, language = ""): string {
+  const longestRun = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}${language}\n${text}\n${fence}`;
+}
+
+/**
  * Format a tool's output, shown (truncated) under its call line.
+ * Multi-line output becomes a fenced code block so indentation, diffs and any
+ * markdown-ish characters in the output stay literal on Matrix.
  * Returns "" when there's nothing to show and it wasn't an error.
  */
 export function formatToolResult(result: any, isError: boolean): string {
   const text = extractToolResultText(result).trim();
   if (!text) return isError ? "↳ ⚠️ (error)" : "";
-  return `↳ ${isError ? "⚠️ " : ""}${truncate(text, 1500)}`;
+  const marker = isError ? "↳ ⚠️" : "↳";
+  const shown = truncate(text, 1500);
+  return shown.includes("\n") ? `${marker}\n${fencedCode(shown)}` : `${marker} ${shown}`;
 }
 
 /**

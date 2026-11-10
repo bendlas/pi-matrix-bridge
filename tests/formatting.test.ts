@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   extractThinkingFromMessage,
   extractToolResultText,
+  fencedCode,
+  formatThinking,
   formatToolCall,
   formatToolCalls,
   formatToolResult,
@@ -91,6 +93,38 @@ describe('extractThinkingFromMessage', () => {
   });
 });
 
+describe('formatThinking', () => {
+  it('wraps reasoning in a Matrix spoiler with the 💭 marker', () => {
+    expect(formatThinking('let me think')).toBe('💭 ||let me think||');
+  });
+
+  it('trims surrounding whitespace', () => {
+    expect(formatThinking('  hmm  ')).toBe('💭 ||hmm||');
+  });
+
+  it('returns empty string for empty reasoning', () => {
+    expect(formatThinking('   ')).toBe('');
+  });
+
+  it('does not let inner || close the spoiler early', () => {
+    expect(formatThinking('a || b')).toBe('💭 ||a |\u200b| b||');
+  });
+});
+
+describe('fencedCode', () => {
+  it('wraps text in a triple-backtick fence', () => {
+    expect(fencedCode('a\nb')).toBe('```\na\nb\n```');
+  });
+
+  it('adds a language tag', () => {
+    expect(fencedCode('x', 'ts')).toBe('```ts\nx\n```');
+  });
+
+  it('grows the fence past backticks inside the text', () => {
+    expect(fencedCode('```\ninner\n```')).toBe('````\n```\ninner\n```\n````');
+  });
+});
+
 describe('formatToolCall', () => {
   it('formats a single tool call with args', () => {
     expect(formatToolCall('grep', { pattern: 'hi', path: '/src' })).toBe(
@@ -139,6 +173,16 @@ describe('formatToolResult', () => {
   it('marks errors', () => {
     const result = { content: [{ type: 'text', text: 'boom' }] };
     expect(formatToolResult(result, true)).toBe('↳ ⚠️ boom');
+  });
+
+  it('renders multi-line output as a fenced code block', () => {
+    const result = { content: [{ type: 'text', text: 'line1\nline2' }] };
+    expect(formatToolResult(result, false)).toBe('↳\n```\nline1\nline2\n```');
+  });
+
+  it('fences multi-line errors too', () => {
+    const result = { content: [{ type: 'text', text: 'boom\ntrace' }] };
+    expect(formatToolResult(result, true)).toBe('↳ ⚠️\n```\nboom\ntrace\n```');
   });
 
   it('returns empty for no output (non-error)', () => {

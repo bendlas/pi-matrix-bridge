@@ -8,6 +8,7 @@ import {
   shouldSkipEvent,
   stripBotMention,
   wasBotMentioned,
+  parseVerifyCommand,
 } from "./matrix-utils.js";
 
 // ─── getRetryAfterMs ──────────────────────────────────────────
@@ -42,6 +43,16 @@ describe("getRetryAfterMs", () => {
   it("returns null for null/undefined", () => {
     expect(getRetryAfterMs(undefined)).toBeNull();
     expect(getRetryAfterMs(null)).toBeNull();
+  });
+
+  it("reads matrix-js-sdk's httpStatus and data.retry_after_ms", () => {
+    expect(
+      getRetryAfterMs({ httpStatus: 429, data: { errcode: "M_LIMIT_EXCEEDED", retry_after_ms: 3000 } })
+    ).toBe(3000);
+  });
+
+  it("recognises a matrix-js-sdk rate-limit error by errcode only", () => {
+    expect(getRetryAfterMs({ httpStatus: 429, errcode: "M_LIMIT_EXCEEDED" })).toBe(1000);
   });
 });
 
@@ -141,6 +152,74 @@ describe("formatForMatrix", () => {
     const original = "**bold** and `code`";
     const result = formatForMatrix(original);
     expect(result.body).toBe(original);
+  });
+
+  it("escapes raw HTML in plain text instead of passing it through", () => {
+    const result = formatForMatrix("a <b>bold</b> claim");
+    expect(result.formattedBody).toContain("&lt;b&gt;bold&lt;/b&gt;");
+    expect(result.formattedBody).not.toContain("<b>");
+  });
+
+  it("renders an unterminated code fence (mid-stream) as a code block", () => {
+    const result = formatForMatrix("```ts\nconst x = 1;");
+    expect(result.formattedBody).toContain('<pre><code class="language-ts">const x = 1;</code></pre>');
+    expect(result.formattedBody).not.toContain("```");
+  });
+
+  it("renders a still-open fence after normal text", () => {
+    const result = formatForMatrix("here:\n```\nfoo()\nbar()");
+    expect(result.formattedBody).toContain("<pre><code>foo()\nbar()</code></pre>");
+  });
+
+  it("keeps longer fences intact inside a code block", () => {
+    const result = formatForMatrix("````md\n```ts\nx\n```\n````");
+    expect(result.formattedBody).toContain("<pre><code class=\"language-md\">```ts\nx\n```</code></pre>");
+  });
+
+  it("converts ||spoiler|| to a Matrix spoiler span", () => {
+    const result = formatForMatrix("careful: ||the butler did it||");
+    expect(result.formattedBody).toContain("<span data-mx-spoiler>the butler did it</span>");
+    expect(result.formattedBody).not.toContain("||");
+  });
+
+  it("keeps inline code inside a spoiler", () => {
+    const result = formatForMatrix("||run `rm -rf /` first||");
+    expect(result.formattedBody).toContain(
+      "<span data-mx-spoiler>run <code>rm -rf /</code> first</span>"
+    );
+  });
+
+  it("formats markdown and line breaks inside a spoiler", () => {
+    const result = formatForMatrix("||**bold**\nnext||");
+    expect(result.formattedBody).toContain("<span data-mx-spoiler><strong>bold</strong><br>next</span>");
+  });
+
+  it("passes /html messages through verbatim with a plain-text body", () => {
+    const result = formatForMatrix("/html\n<p>Hello <b>there</b> &amp; welcome</p>");
+    expect(result.formattedBody).toBe("<p>Hello <b>there</b> &amp; welcome</p>");
+    expect(result.body).toBe("Hello there & welcome");
+  });
+
+  it("supports /html on a single line", () => {
+    const result = formatForMatrix("/html <span data-mx-spoiler>secret</span>");
+    expect(result.formattedBody).toBe('<span data-mx-spoiler>secret</span>');
+    expect(result.body).toBe("secret");
+  });
+
+  it("ignores a bare /html with no content", () => {
+    expect(formatForMatrix("/html")).toEqual({ body: "/html" });
+  });
+
+  it("renders a markdown prefix (rate-limit note) alongside /html", () => {
+    const result = formatForMatrix("/html <b>hi</b>", "*(delayed)*");
+    expect(result.body).toBe("*(delayed)*\n\nhi");
+    expect(result.formattedBody).toBe("<em>(delayed)</em><br><br><b>hi</b>");
+  });
+
+  it("prepends a prefix to normal markdown messages", () => {
+    const result = formatForMatrix("**hi**", "note");
+    expect(result.body).toBe("note\n\n**hi**");
+    expect(result.formattedBody).toBe("note<br><br><strong>hi</strong>");
   });
 });
 
@@ -309,7 +388,7 @@ describe("formatForMatrix properties", () => {
 
   it("formattedBody is undefined when no markdown chars present", () => {
     // Generate strings that don't contain markdown-triggering chars
-    const noMarkdown = fc.string().filter((s) => !/[*_`#[]/.test(s));
+    const noMarkdown = fc.string().filter((s) => !/[*_`#\[\]<>]|\|\|/.test(s));
     fc.assert(
       fc.property(noMarkdown, (text) => {
         const result = formatForMatrix(text);
@@ -358,3 +437,50 @@ describe("escapeHtml properties", () => {
 // - sendMessage()/sendTyping() (thin SDK wrappers)
 // - index.ts wiring (env var reading, command handler plumbing)
 // - Widget abbreviation (mx)
+
+describe("parseVerifyCommand", () => {
+  it("treats a bare /verify as list", () => {
+    expect(parseVerifyCommand("/verify")).toEqual({ action: "list" });
+    expect(parseVerifyCommand("  /verify  ")).toEqual({ action: "list" });
+  });
+
+  it("parses the SAS actions with an id", () => {
+    expect(parseVerifyCommand("/verify accept afd510066368414e9096bfc7a108d567")).toEqual({
+      action: "accept",
+      id: "afd510066368414e9096bfc7a108d567",
+    });
+    expect(parseVerifyCommand("/verify mismatch abc")).toEqual({ action: "mismatch", id: "abc" });
+    expect(parseVerifyCommand("/verify cancel abc")).toEqual({ action: "cancel", id: "abc" });
+    expect(parseVerifyCommand("/verify LIST")).toEqual({ action: "list" });
+  });
+
+  it("keeps ids that contain spaces", () => {
+    expect(parseVerifyCommand("/verify accept @u:x: DEV")).toEqual({ action: "accept", id: "@u:x: DEV" });
+  });
+
+  it("ignores non-verification or unknown input", () => {
+    expect(parseVerifyCommand("/verifyfoo")).toBeNull();
+    expect(parseVerifyCommand("/verify nope abc")).toBeNull();
+    expect(parseVerifyCommand("verify accept abc")).toBeNull();
+    expect(parseVerifyCommand("hello")).toBeNull();
+  });
+});
+
+describe("parseVerifyCommand start", () => {
+  it("parses an explicit device id", () => {
+    expect(parseVerifyCommand("/verify start daZejMzfih")).toEqual({ action: "start", id: "daZejMzfih" });
+  });
+});
+
+describe("parseVerifyCommand sign", () => {
+  it("parses the direct cross-sign action", () => {
+    expect(parseVerifyCommand("/verify sign CONTOXFROGBOT")).toEqual({ action: "sign", id: "CONTOXFROGBOT" });
+  });
+});
+
+describe("parseVerifyCommand auto", () => {
+  it("parses the auto-confirm toggle", () => {
+    expect(parseVerifyCommand("/verify auto on")).toEqual({ action: "auto", id: "on" });
+    expect(parseVerifyCommand("/verify auto off")).toEqual({ action: "auto", id: "off" });
+  });
+});

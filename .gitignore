@@ -31,3 +31,6 @@ Thumbs.db
 .claude
 .vscode
 .pi-lens/
+
+# pi task store (local state)
+.pi/

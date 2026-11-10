@@ -2,7 +2,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { loadConfig, saveConfig, shouldAutoConnect } from "./config.js";
-import { extractTextFromMessage, extractThinkingFromMessage, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
+import { extractTextFromMessage, extractThinkingFromMessage, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { TransportManager } from "./transports/manager.js";
 import { MatrixProvider } from "./transports/matrix.js";
@@ -213,6 +213,9 @@ export default function (pi: ExtensionAPI): void {
     (async () => {
       if (config.matrix?.homeserverUrl && config.matrix?.accessToken) {
         const matrixProvider = new MatrixProvider(config.matrix, auth);
+        matrixProvider.onVerificationNotification((message, level) => {
+          ctx.ui.notify(message, level);
+        });
         transportManager.addTransport(matrixProvider);
       }
 
@@ -324,7 +327,7 @@ export default function (pi: ExtensionAPI): void {
     try {
       if (turnShowThinking) {
         const thinking = extractThinkingFromMessage(message);
-        if (thinking) await pushStream(chat, thinkingStream, `💭 ${thinking}`);
+        if (thinking) await pushStream(chat, thinkingStream, formatThinking(thinking));
       }
 
       streamedText = extractTextFromMessage(message).trim();
@@ -382,7 +385,7 @@ export default function (pi: ExtensionAPI): void {
       // Finalize the streamed thinking message — the last live edit may have
       // been throttled, so push the complete reasoning once the turn ends.
       if (!config.hideThinking && thinkingStream.msgId) {
-        const finalThinking = `💭 ${extractThinkingFromMessage(message)}`;
+        const finalThinking = formatThinking(extractThinkingFromMessage(message));
         if (finalThinking !== thinkingStream.lastText) {
           await transportManager
             .editMessage(chat.chatId, chat.transport, thinkingStream.msgId, finalThinking)
@@ -443,7 +446,7 @@ export default function (pi: ExtensionAPI): void {
    * /matrix-bridge command - show status or manage connections
    */
   pi.registerCommand("matrix-bridge", {
-    description: "Manage the Matrix bridge (help|status|connect|disconnect|configure|widget)",
+    description: "Manage the Matrix bridge (help|status|connect|disconnect|configure|verify|widget)",
     handler: async (args: string, context) => {
       const parts = args.trim().split(/\s+/).filter(p => p.length > 0);
       const subcommand = parts[0] || "";
@@ -471,6 +474,13 @@ export default function (pi: ExtensionAPI): void {
           "/matrix-bridge disconnect        Disconnect from Matrix",
           "/matrix-bridge configure matrix <homeserver-url> <access-token>",
           "                              Configure Matrix (Element X, etc)",
+          "/matrix-bridge verify            List pending device verifications",
+          "/matrix-bridge verify accept <id>  Confirm SAS emoji match (verifies device)",
+          "/matrix-bridge verify mismatch <id>  Report SAS values did not match",
+          "/matrix-bridge verify cancel <id>  Abort a verification",
+          "/matrix-bridge verify start <device>  Start verification from the bridge",
+          "/matrix-bridge verify auto on|off  Auto-confirm SAS (beats the 60s timeout)",
+          "/matrix-bridge verify sign <device>  Cross-sign without SAS (needs recovery-key file)",
           "/matrix-bridge widget            Toggle status widget on/off",
           "/matrix-bridge toggletools       Toggle tool call visibility",
           "/matrix-bridge togglethinking    Toggle live thinking (💭) visibility",
@@ -530,6 +540,9 @@ export default function (pi: ExtensionAPI): void {
             config.matrix = { homeserverUrl, accessToken: matrixAccessToken };
             saveConfig(config);
             const matrixProvider = new MatrixProvider(config.matrix, auth);
+            matrixProvider.onVerificationNotification((message, level) => {
+              context.ui.notify(message, level);
+            });
             transportManager.addTransport(matrixProvider);
             if (acquireLock()) {
               try {
@@ -548,6 +561,103 @@ export default function (pi: ExtensionAPI): void {
 
           default:
             context.ui.notify(`❌ Unknown platform: ${platform}`, "error");
+        }
+        break;
+      }
+
+      case "verify": {
+        const transport = transportManager.getTransport("matrix");
+        if (!(transport instanceof MatrixProvider)) {
+          context.ui.notify("❌ Matrix is not configured. Run /matrix-bridge configure matrix first.", "error");
+          break;
+        }
+        if (!transport.isConnected) {
+          context.ui.notify("⚠️ Matrix is not connected. Run /matrix-bridge connect first.", "warning");
+          break;
+        }
+        if (!transport.encryptionEnabled) {
+          context.ui.notify("⚠️ E2EE is disabled for this transport — device verification is unavailable.", "warning");
+          break;
+        }
+
+        const action = parts[1] ?? "list";
+        const id = parts.slice(2).join(" ").trim();
+        try {
+          switch (action) {
+            case "list": {
+              const pending = transport.listVerifications();
+              if (pending.length === 0) {
+                context.ui.notify(
+                  [
+                    "No device verification in progress.",
+                    "Start one in Element: Settings → Sessions → select this session → Verify.",
+                    `(bridge device: ${transport.deviceId ?? "unknown"})`,
+                  ].join("\n"),
+                  "info",
+                );
+              } else {
+                const lines = ["━━━ Pending verifications ━━━"];
+                for (const v of pending) {
+                  lines.push(`${v.id}  ${v.userId} ${v.deviceId ?? ""}  [${v.phase}]`);
+                  if (v.emoji?.length) lines.push(`  emoji: ${v.emoji.join(" ")}`);
+                  if (v.decimal?.length) lines.push(`  numbers: ${v.decimal.join(" ")}`);
+                }
+                context.ui.notify(lines.join("\n"), "info");
+              }
+              break;
+            }
+            case "accept":
+              if (!id) {
+                context.ui.notify("Usage: /matrix-bridge verify accept <id>", "error");
+                break;
+              }
+              await transport.acceptVerification(id);
+              break;
+            case "start":
+              if (!id) {
+                context.ui.notify("Usage: /matrix-bridge verify start <deviceId>", "error");
+                break;
+              }
+              await transport.startVerification(id);
+              break;
+            case "auto": {
+              const value = id.toLowerCase();
+              if (value !== "on" && value !== "off") {
+                context.ui.notify("Usage: /matrix-bridge verify auto on|off", "error");
+                break;
+              }
+              transport.setVerificationAutoConfirm(value === "on");
+              break;
+            }
+            case "sign":
+              if (!id) {
+                context.ui.notify("Usage: /matrix-bridge verify sign <deviceId>", "error");
+                break;
+              }
+              await transport.crossSignDevice(id);
+              break;
+            case "mismatch":
+              if (!id) {
+                context.ui.notify("Usage: /matrix-bridge verify mismatch <id>", "error");
+                break;
+              }
+              await transport.mismatchVerification(id);
+              break;
+            case "cancel":
+              if (!id) {
+                context.ui.notify("Usage: /matrix-bridge verify cancel <id>", "error");
+                break;
+              }
+              await transport.cancelVerification(id);
+              break;
+            default:
+              context.ui.notify(
+                "Usage: /matrix-bridge verify [list|start <device>|auto on|off|sign <device>|accept <id>|mismatch <id>|cancel <id>]",
+                "warning",
+              );
+          }
+        } catch (err) {
+          context.ui.notify(`❌ ${(err as Error).message}`, "error");
         }
         break;
       }
@@ -582,6 +692,13 @@ export default function (pi: ExtensionAPI): void {
               lines.push(`  └─ ${transport}: ${userIds.join(", ")}`);
             }
           }
+        }
+
+        const matrixTransport = transportManager.getTransport("matrix");
+        if (matrixTransport instanceof MatrixProvider && matrixTransport.isConnected) {
+          lines.push("");
+          lines.push(`Device: ${matrixTransport.deviceId ?? "unknown"}`);
+          lines.push(`E2EE: ${matrixTransport.encryptionEnabled ? "on" : "off"}`);
         }
 
         lines.push("");

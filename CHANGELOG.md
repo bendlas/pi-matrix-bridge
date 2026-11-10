@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Device verification (SAS/emoji).** The bridge can now be verified from Element
+  like any other session: `/matrix-bridge verify` lists pending verifications and
+  shows the 7 emoji, `verify accept <id>` confirms the match (completing
+  verification), `verify mismatch <id>` / `verify cancel <id>` abort. The bridge
+  auto-accepts the request and starts SAS but never confirms on its own — you
+  compare the emoji and confirm. Fixes
+  [#1](https://github.com/rolznz/pi-matrix-bridge/issues/1).
+- **`/matrix-bridge verify start <device>` / `verify auto on|off`.** Start a
+  verification from the bridge (instead of waiting for Element) and optionally
+  auto-confirm the SAS. Rust crypto times out a SAS after 60s, which is short for
+  "compare emoji here, click *They match* in Element"; auto-confirm leaves only the
+  Element click. The same actions are available in chat as `/verify …`.
+- **Matrix-native formatting.** Outbound messages now render as real Matrix HTML:
+  fenced code blocks (3+ backticks, including a still-open fence mid-stream),
+  inline code, bold/italic/links, and `||spoiler||` → `<span data-mx-spoiler>`.
+  Plain text is HTML-escaped, so literal `<tag>` stays visible.
+- **Reasoning is sent as a spoiler** (`💭 ||…||`) — collapsed in Element until
+  tapped, so long thinking no longer buries the answer. Toggle unchanged
+  (`/togglethinking`, `hideThinking`).
+- **`/html` escape hatch** — a message whose first line is `/html` is passed
+  through verbatim as `formatted_body`, with a tag-stripped plain-text `body`.
+
+### Changed
+- **Matrix transport now uses `matrix-js-sdk` (Rust/WASM crypto)** instead of
+  `matrix-bot-sdk`. Its Node crypto bindings cannot do interactive verification or
+  encrypted to-device messages, which made device verification impossible. Behaviour
+  is otherwise unchanged (same commands, rate-limit queue, streaming, formatting).
+- **Crypto state is snapshotted to `~/.pi/matrix-bridge-crypto.json`** (mode 0600)
+  because matrix-js-sdk's Rust store is IndexedDB/in-memory in Node. The old native
+  store (`~/.pi/matrix-bridge-crypto/`, `~/.pi/matrix-bridge-store.json`) is ignored:
+  after upgrading, verify the session once and revoke the stale device in Element.
+- **Node.js 22+ is now required** (matrix-js-sdk 45 drops older releases).
+- **Multi-line tool output is fenced as a code block** (`↳` then a fence whose
+  length grows past any backticks in the output), so indentation, diffs and
+  markdown-ish characters in tool results stay literal.
+
 ## [0.5.0] - 2026-06-07
 
 ### Added
