@@ -196,6 +196,22 @@ Environment variables override file config:
 - `PI_MATRIX_BRIDGE_HOMESERVER` — Matrix homeserver URL (e.g. `https://matrix.org`)
 - `PI_MATRIX_BRIDGE_ACCESS_TOKEN` — Matrix access token
 
+### Commands over chat
+
+Matrix has no command protocol — Element treats an unknown `/foo` as ordinary
+text — so the bridge accepts the community `!command` convention (and `/`, where
+pi-web's own command set leaves the name free) from a trusted user's DM:
+
+- `!reload` — reload extensions, skills and prompts. Dispatched immediately when
+  the agent is idle, otherwise deferred to `agent_settled` so a running turn is
+  never interrupted.
+- `!help`, `!session`, `stop`, `!matrix-bridge verify …` — see `/help`.
+
+Answering an `ask_user` question set works as a plain reply: `1a 2c` picks
+options, `1a ~ note` adds a comment, `2: free text` answers with custom text and
+`/skip` skips the set. Anything that does not parse is forwarded to the agent as
+a normal message.
+
 ## Security
 
 - Config file: `~/.pi/matrix-bridge.json` (chmod 600 - owner read/write only)

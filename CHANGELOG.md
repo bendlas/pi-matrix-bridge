@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `!reload` over chat reloads the pi runtime (extensions, skills, prompts). It is
+  dispatched as the `bridge-reload` command: immediately when the agent is idle,
+  otherwise from `agent_settled`, because pi cannot reload mid-turn. Requires
+  pi ≥ 1.4.0 for `agent_settled` and `expandPromptTemplates`; the dev dependency
+  now matches the runtime.
 - `autoConnect` config flag: `"autoConnect": true` in `~/.pi/matrix-bridge.json`
   connects the transport when the session starts, without needing the
   `PI_MATRIX_BRIDGE_AUTO_CONNECT` env var (which still overrides it, so a systemd

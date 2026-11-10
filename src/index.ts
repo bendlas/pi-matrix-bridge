@@ -4,6 +4,7 @@ import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { loadConfig, saveConfig, shouldAutoConnect } from "./config.js";
 import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
 import { answerHint, buildAskOutcome, parseAskAnswers, renderAskAnswersText } from "./ask.js";
+import { isReloadCommand } from "./chat-commands.js";
 import type { AskRequest } from "./ask.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { TransportManager } from "./transports/manager.js";
@@ -21,6 +22,16 @@ const ASK_USER_ANSWERS_CUSTOM_TYPE = "pi-web.ask.answers";
 
 /** The question set the chat may still answer, if one is outstanding. */
 let pendingAsk: AskRequest | null = null;
+
+/**
+ * Command that performs the reload. pi cannot reload while the agent runs and a
+ * chat message arrives outside any command handler, so the reload is dispatched
+ * as a command: immediately when idle, from `agent_settled` when mid-turn.
+ */
+const RELOAD_COMMAND = "bridge-reload";
+
+/** Set when a chat asked to reload during a turn. */
+let reloadRequested = false;
 
 /** Min interval between in-place edits of a live streamed message. */
 const STREAM_EDIT_THROTTLE_MS = 900;
@@ -194,6 +205,26 @@ export default function (pi: ExtensionAPI): void {
   /**
    * Initialize extension
    */
+  /**
+   * Chat-driven reload. Registered as a command because that is the only place
+   * `ctx.reload()` may be awaited; a chat message arrives from the Matrix sync
+   * loop, where pi is not in a reloadable context.
+   */
+  pi.registerCommand(RELOAD_COMMAND, {
+    description: "Reload extensions, skills, prompts and themes (used by the chat !reload)",
+    handler: async (_args, commandContext) => {
+      await commandContext.reload();
+      return;
+    },
+  });
+
+  pi.on("agent_settled", () => {
+    if (!reloadRequested) return;
+    reloadRequested = false;
+    // Dispatch as a command, not model input, so no turn is started for it.
+    pi.sendUserMessage(`/${RELOAD_COMMAND}`, { expandPromptTemplates: true });
+  });
+
   pi.on("session_start", async (_event, context) => {
     ctx = context;
 
@@ -304,6 +335,25 @@ export default function (pi: ExtensionAPI): void {
             );
           return;
         }
+      }
+
+      // `!reload` / `/reload` from the chat reloads pi (extensions, skills,
+      // prompts). Acknowledge first: the reload tears this runtime down.
+      if (isReloadCommand(msg.content)) {
+        transportManager
+          .sendMessage(msg.chatId, msg.transport, "🔄 Reloading the pi runtime…")
+          .catch(() => {});
+        if (ctx.isIdle()) {
+          pi.sendUserMessage(`/${RELOAD_COMMAND}`, { expandPromptTemplates: true });
+        } else {
+          // Mid-turn: the settled handler dispatches once the turn ends, so the
+          // reload cannot interrupt running work.
+          reloadRequested = true;
+          transportManager
+            .sendMessage(msg.chatId, msg.transport, "…after the current turn finishes.")
+            .catch(() => {});
+        }
+        return;
       }
 
       pendingRemoteChat = {

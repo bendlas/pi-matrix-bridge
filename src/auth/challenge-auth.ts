@@ -409,10 +409,13 @@ _Commands accept either a \`/\` or \`!\` prefix (e.g. \`/help\` or \`!help\`)._
 • \`/toggletools\` — Toggle tool call visibility in replies
 • \`/togglethinking\` — Toggle live thinking (💭) visibility
 • \`/session\` — Show current session info (model, context, status)
+• \`/reload\` — Reload extensions, skills and prompts (waits for the current turn)
 • \`/shutdown\` — Stop pi (restarts into a fresh session under systemd)
 
 *Any authorized user:*
 • \`stop\` — Interrupt the current turn (also \`/stop\` or \`!stop\`)
+• \`1a 2c\` — Answer an ask_user question set (letters = options)
+  \`1a ~ note\` adds a comment, \`2: free text\` answers with text, \`/skip\` skips
 
 *Authentication:*
 • First DM to bot → 6-digit code shown in terminal
