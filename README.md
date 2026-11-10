@@ -192,7 +192,7 @@ Example config:
 
 Environment variables override file config:
 
-- `PI_MATRIX_BRIDGE_AUTO_CONNECT` — connect on startup. **Defaults to off** — set to `1` to activate the bridge. Left unset, the plugin stays dormant (no connection) and you can connect manually with `/matrix-bridge connect`. See [Headless / always-on](#headless-always-on-systemd).
+- `PI_MATRIX_BRIDGE_AUTO_CONNECT` — connect on startup; overrides `autoConnect` from the config file in both directions (set it to `0` to force the bridge dormant). **Defaults to off** unless `"autoConnect": true` is set in `~/.pi/matrix-bridge.json`. With neither set the plugin stays dormant (no connection) and you connect with `/matrix-bridge connect`. See [Headless / always-on](#headless-always-on-systemd).
 - `PI_MATRIX_BRIDGE_HOMESERVER` — Matrix homeserver URL (e.g. `https://matrix.org`)
 - `PI_MATRIX_BRIDGE_ACCESS_TOKEN` — Matrix access token
 
@@ -260,7 +260,7 @@ Run pi as a dedicated, always-on Matrix endpoint you can talk to from your phone
 
 ### Activation
 
-The plugin **does not connect on startup unless `PI_MATRIX_BRIDGE_AUTO_CONNECT=1`**. This lets a dedicated headless instance own the bot (it sets the env var) while a desktop pi with the same plugin installed stays dormant — no connection, no status widget, no notices. The desktop can still connect on demand with `/matrix-bridge connect`.
+The plugin **does not connect on startup unless `PI_MATRIX_BRIDGE_AUTO_CONNECT=1` or `"autoConnect": true` is in the config file**. This lets a dedicated headless instance own the bot (it sets the env var) while a desktop pi with the same plugin installed stays dormant — no connection, no status widget, no notices. The desktop can still connect on demand with `/matrix-bridge connect`.
 
 ### Install the service
 

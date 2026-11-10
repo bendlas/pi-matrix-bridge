@@ -72,7 +72,7 @@ const SEGMENT = /^(\d+|[a-z][\w-]*)\s*[:.)-]?\s*([a-z]{1,12})?\s*(?:~\s*([\s\S]*
 /** `<n>: free text` / `<n>. free text` / `<n>- free text`. */
 const FREE_TEXT = /^(\d+|[a-z][\w-]*)\s*[:.)-]\s*(\S[\s\S]*)$/;
 
-/** Split an answer message into segments, or null when it is prose. */
+/** Split an answer message into segments, or null when there is nothing to parse. */
 function segments(text: string): string[] | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
@@ -86,10 +86,7 @@ function segments(text: string): string[] | null {
     .split(/[\n;]+/)
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
-  if (parts.length === 0) return null;
-  // Every segment must look like an answer; one prose segment means this is a
-  // message, not an answer.
-  return parts.every((part) => SEGMENT.test(part) || FREE_TEXT.test(part)) ? parts : null;
+  return parts.length > 0 ? parts : null;
 }
 
 /** Resolve a `1` or a question id to its question. */
@@ -126,19 +123,30 @@ export function parseAskAnswers(text: string, ask: AskRequest): AskAnswer[] | nu
   if (!parts) return null;
 
   const answers = new Map<string, AskAnswer>();
+  const sole = (): AskAnswer | undefined => [...answers.values()].pop();
+
   for (const part of parts) {
     const free = FREE_TEXT.exec(part);
     const typed = SEGMENT.exec(part);
-
     const key = free?.[1] ?? typed?.[1];
-    if (!key) return null;
-    const question = findQuestion(ask.questions, key);
-    if (!question) return null;
+    const question = key ? findQuestion(ask.questions, key) : undefined;
+
+    if (!question) {
+      // A number that names no question is a typo worth reporting.
+      if (key && /^\d+$/.test(key)) return null;
+      // Anything else is prose after an answer: it continues that answer's
+      // comment, so a note may run over several lines. Prose before any answer
+      // means the message is not an answer at all.
+      const last = sole();
+      if (!last) return null;
+      last.comment = last.comment ? `${last.comment} ${part}` : part;
+      continue;
+    }
 
     const existing: AskAnswer = answers.get(question.id) ?? { id: question.id };
 
     if (free && !typed?.[2]) {
-      // `<n>: free text` answers with custom text.
+      // `<n>: free text` answers with custom text instead of an option.
       const otherText = free[2].trim();
       if (!otherText) return null;
       existing.otherText = otherText;

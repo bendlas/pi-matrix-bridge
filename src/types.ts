@@ -39,6 +39,12 @@ export interface MatrixBridgeConfig {
   /** Hide the model's reasoning (💭) from remote messages. Shown by default. */
   hideThinking?: boolean;
   showWidget?: boolean;
+  /**
+   * Connect the Matrix transport as soon as the agent session starts, without
+   * `/matrix-bridge connect`. The PI_MATRIX_BRIDGE_AUTO_CONNECT env var, when
+   * set, overrides this.
+   */
+  autoConnect?: boolean;
 }
 
 /**

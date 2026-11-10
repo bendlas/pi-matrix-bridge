@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `autoConnect` config flag: `"autoConnect": true` in `~/.pi/matrix-bridge.json`
+  connects the transport when the session starts, without needing the
+  `PI_MATRIX_BRIDGE_AUTO_CONNECT` env var (which still overrides it, so a systemd
+  unit can force the bridge dormant or live regardless of user config).
 - **`ask_user` questions reach the chat.** When the agent posts a question set the
   room now gets it too, as lettered options (`1a`, `2 <text>`) with the option
   values the model will see, plus a hint that a plain reply works. Before this,
@@ -15,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there was no way to answer from Matrix. A reply typed in the chat is delivered
   to the agent as an ordinary message, which is what the browser form's follow-up
   would have been anyway, so no extra plumbing is needed to route answers back.
+- **A comment continues over line breaks and semicolons**: prose after an answer
+  is appended to that answer's comment instead of failing the whole parse, so
+  `1a ~ a note\nspanning lines` works and an answer typed after a long note is no
+  longer folded into it.
 - **Answers typed in the chat are submitted as real answers.** `1a 2c` selects
   options, `1a ~ note` adds a comment, `2: free text` answers with custom text,
   `/skip` skips the set. A structured answer is delivered as pi-web's own

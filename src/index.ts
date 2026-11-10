@@ -233,7 +233,7 @@ export default function (pi: ExtensionAPI): void {
 
       // Auto-connect if configured
       const transports = transportManager.getAllTransports();
-      if (transports.length > 0 && shouldAutoConnect()) {
+      if (transports.length > 0 && shouldAutoConnect(config)) {
         if (!acquireLock()) {
           ctx.ui.notify("ℹ️ matrix-bridge: another instance is already connected — skipping auto-connect", "info");
         } else {

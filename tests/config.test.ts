@@ -134,6 +134,24 @@ describe('config', () => {
   it('shouldAutoConnect defaults to false when env var is unset', async () => {
     const { shouldAutoConnect } = await importConfig();
     expect(shouldAutoConnect()).toBe(false);
+    expect(shouldAutoConnect({})).toBe(false);
+  });
+
+  it('shouldAutoConnect honours autoConnect in the config file', async () => {
+    const { shouldAutoConnect } = await importConfig();
+    expect(shouldAutoConnect({ autoConnect: true })).toBe(true);
+    expect(shouldAutoConnect({ autoConnect: false })).toBe(false);
+  });
+
+  it('lets the env var override the config file in both directions', async () => {
+    const { shouldAutoConnect } = await importConfig();
+    process.env.PI_MATRIX_BRIDGE_AUTO_CONNECT = '0';
+    expect(shouldAutoConnect({ autoConnect: true })).toBe(false);
+    process.env.PI_MATRIX_BRIDGE_AUTO_CONNECT = '1';
+    expect(shouldAutoConnect({ autoConnect: false })).toBe(true);
+    // An empty value counts as unset, so config still applies.
+    process.env.PI_MATRIX_BRIDGE_AUTO_CONNECT = '';
+    expect(shouldAutoConnect({ autoConnect: true })).toBe(true);
   });
 
   it('shouldAutoConnect is true only for "1"/"true"/"yes" (case-insensitive)', async () => {

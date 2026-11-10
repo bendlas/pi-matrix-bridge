@@ -39,16 +39,22 @@ export function loadConfig(): MatrixBridgeConfig {
 }
 
 /**
- * Whether to connect transports on startup. Controlled by the
- * PI_MATRIX_BRIDGE_AUTO_CONNECT env var (not persisted config). Defaults to
- * OFF — the plugin stays dormant unless this is set to "1"/"true"/"yes". The
- * headless systemd unit sets it; a desktop pi with the plugin installed makes
- * no connection on startup (and can still connect manually with
- * /matrix-bridge connect).
+ * Whether to connect transports on startup.
+ *
+ * Two sources, in order: the PI_MATRIX_BRIDGE_AUTO_CONNECT env var (set by the
+ * headless systemd unit, and by anything that cannot persist config), then
+ * `autoConnect` in the config file. The env var wins when present so a unit file
+ * can force or forbid a connection regardless of the user's config.
+ *
+ * Defaults to OFF — a desktop pi with the plugin installed stays dormant unless
+ * asked, and can connect with /matrix-bridge connect.
  */
-export function shouldAutoConnect(): boolean {
+export function shouldAutoConnect(config?: MatrixBridgeConfig): boolean {
   const v = process.env.PI_MATRIX_BRIDGE_AUTO_CONNECT?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
+  if (v !== undefined && v !== "") {
+    return v === "1" || v === "true" || v === "yes";
+  }
+  return config?.autoConnect === true;
 }
 
 /**

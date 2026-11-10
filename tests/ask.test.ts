@@ -91,11 +91,22 @@ describe('parseAskAnswers', () => {
     ]);
   });
 
-  it('falls back to a plain message when a comment breaks the segment grammar', () => {
-    // ';' and newlines separate segments, so prose that contains them cannot be
-    // attributed to one answer. Dropping to the plain path is deliberate.
-    expect(parseAskAnswers('1a ~ note; with semicolon', ask)).toBeNull();
-    expect(parseAskAnswers('1a ~ note\nand more prose here', ask)).toBeNull();
+  it('continues a comment over semicolons and newlines', () => {
+    expect(parseAskAnswers('1a ~ note; with semicolon', ask)).toEqual([
+      { id: 'reached', values: ['yes'], comment: 'note with semicolon' },
+    ]);
+    expect(parseAskAnswers('1a ~ first line\nsecond line of the note', ask)).toEqual([
+      { id: 'reached', values: ['yes'], comment: 'first line second line of the note' },
+    ]);
+  });
+
+  it('starts a new answer after a comment that ran over a line break', () => {
+    // The failure that prompted this: an answer typed after a multi-line comment
+    // used to be folded into the comment and leave its question unanswered.
+    expect(parseAskAnswers('1a ~ a considered note\n2: free text', ask)).toEqual([
+      { id: 'reached', values: ['yes'], comment: 'a considered note' },
+      { id: 'routing', otherText: 'free text' },
+    ]);
   });
 
   it('returns null for prose, so real messages are never swallowed', () => {
