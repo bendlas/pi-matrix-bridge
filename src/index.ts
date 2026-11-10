@@ -6,12 +6,13 @@ import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions,
 import { answerHint, buildAskOutcome, parseAskAnswers, renderAskAnswersText } from "./ask.js";
 import { formatContextUsage } from "./formatting.js";
 import { chatCommandName } from "./chat-commands.js";
+import { createPendingMessages } from "./pending-messages.js";
 import { logVerification } from "./transports/verification.js";
 import type { AskRequest } from "./ask.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { TransportManager } from "./transports/manager.js";
 import { MatrixProvider } from "./transports/matrix.js";
-import type { PendingRemoteChat, TransportStatus } from "./types.js";
+import type { ExternalMessage, PendingRemoteChat, TransportStatus } from "./types.js";
 import { openMainMenu } from "./ui/main-menu.js";
 import { createStatusWidget } from "./ui/status-widget.js";
 
@@ -37,6 +38,10 @@ let reloadRequested = false;
 
 /** Deferred `!compact`, run once the current turn settles. */
 let compactRequestedFor: { chatId: string; transport: string } | null = null;
+
+/** Chat messages that arrived while pi refused prompts (compaction in flight). */
+const pendingChatMessages = createPendingMessages<ExternalMessage>();
+let compactionInFlight = false;
 
 /** Min interval between in-place edits of a live streamed message. */
 const STREAM_EDIT_THROTTLE_MS = 900;
@@ -185,6 +190,72 @@ export default function (pi: ExtensionAPI): void {
    */
   async function pushResponse(chat: PendingRemoteChat, force = false): Promise<void> {
     await pushStream(chat, responseStream, renderResponse(), force);
+  }
+
+  /**
+   * Hand a chat message to the agent, queueing it while compaction runs.
+   *
+   * `prompt()` throws "Cannot submit a prompt while compaction is in progress"
+   * before it considers `deliverAs`, so mid-compaction messages have to wait;
+   * the rejection used to be unhandled and the message vanished.
+   */
+  function forwardToAgent(msg: ExternalMessage): void {
+    if (compactionInFlight) {
+      pendingChatMessages.push(msg);
+      logVerification(`chat event queued (compaction in flight): queue=${pendingChatMessages.size()}`);
+      transportManager
+        .sendMessage(
+          msg.chatId,
+          msg.transport,
+          `⏳ Compaction is running — queued (${pendingChatMessages.size()} waiting).`
+        )
+        .catch(() => {});
+      return;
+    }
+
+    pendingRemoteChat = {
+      chatId: msg.chatId,
+      transport: msg.transport,
+      username: msg.username,
+      messageId: msg.messageId,
+    };
+
+    const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
+    // Only queue as a follow-up when the agent is mid-turn — that's the case
+    // `followUp` was added for (avoiding a crash on a message arriving during
+    // a turn, fixes #10). When idle, send normally so the message triggers a
+    // turn and renders immediately; otherwise the very first message can sit
+    // in the queue without ever showing.
+    //
+    // `pi.sendUserMessage()` returns void, so a rejection inside pi cannot be
+    // observed here — hence the guard above rather than a catch here.
+    logVerification(`chat event -> agent: room=${msg.chatId} idle=${ctx.isIdle()}`);
+    pi.sendUserMessage(taggedMessage, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+  }
+
+  /**
+   * Replay chat messages held back by a compaction.
+   *
+   * Only sends once the session is genuinely idle: `session_compact` is emitted
+   * *before* pi clears its manual-compaction state, so a prompt from that
+   * handler is still refused. Retries until the session settles instead of
+   * dropping the queued messages.
+   */
+  function flushPendingChatMessages(attempt = 0): void {
+    if (compactionInFlight || pendingChatMessages.size() === 0) return;
+    if (!ctx.isIdle()) {
+      if (attempt < 120) {
+        setTimeout(() => flushPendingChatMessages(attempt + 1), 500);
+      } else {
+        logVerification(`chat queue STUCK: ${pendingChatMessages.size()} message(s) not delivered`);
+      }
+      return;
+    }
+    const queued = pendingChatMessages.drain();
+    logVerification(`chat queue flushing: ${queued.length} message(s)`);
+    for (const message of queued) {
+      forwardToAgent(message);
+    }
   }
 
   /**
@@ -361,6 +432,14 @@ export default function (pi: ExtensionAPI): void {
             new Date().toISOString(),
             skip ? "cancelled" : "submitted"
           );
+          if (compactionInFlight) {
+            // pi refuses prompts while compacting; keep the ask open so the
+            // answers are not consumed and lost.
+            await transportManager
+              .sendMessage(msg.chatId, msg.transport, "⏳ Compaction is running — reopening answers afterwards.")
+              .catch(() => {});
+            return;
+          }
           pendingAsk = null;
           pi.sendMessage(
             {
@@ -427,20 +506,7 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      pendingRemoteChat = {
-        chatId: msg.chatId,
-        transport: msg.transport,
-        username: msg.username,
-        messageId: msg.messageId,
-      };
-
-      const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
-      // Only queue as a follow-up when the agent is mid-turn — that's the case
-      // `followUp` was added for (avoiding a crash on a message arriving during
-      // a turn, fixes #10). When idle, send normally so the message triggers a
-      // turn and renders immediately; otherwise the very first message can sit
-      // in the queue without ever showing.
-      pi.sendUserMessage(taggedMessage, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+      forwardToAgent(msg);
     });
 
     transportManager.onError((err, transport) => {
@@ -449,6 +515,20 @@ export default function (pi: ExtensionAPI): void {
 
     updateWidget();
   });
+
+  // pi refuses prompts while compacting, so track it and hold chat messages.
+  pi.on("session_before_compact", () => {
+    compactionInFlight = true;
+  });
+
+  const afterCompaction = (): void => {
+    compactionInFlight = false;
+    // One tick later: emission precedes pi clearing its compaction state.
+    setTimeout(() => flushPendingChatMessages(), 0);
+  };
+
+  pi.on("session_compact", afterCompaction);
+  pi.on("session_compact_failed", afterCompaction);
 
   /**
    * Handle turn start - send typing indicator

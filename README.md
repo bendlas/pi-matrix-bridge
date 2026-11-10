@@ -210,6 +210,11 @@ pi-web's own command set leaves the name free) from a trusted user's DM:
   mid-request races the running call.
 - `!help`, `!session`, `stop`, `!matrix-bridge verify …` — see `/help`.
 
+A message that arrives while a compaction runs is queued rather than dropped:
+pi refuses prompts mid-compaction, so the bridge holds the message and replays
+it, in order, once the session is idle again (`⏳ Compaction is running — queued
+(1 waiting)`).
+
 Answering an `ask_user` question set works as a plain reply: `1a 2c` picks
 options, `1a ~ note` adds a comment, `2: free text` answers with custom text and
 `/skip` skips the set. Anything that does not parse is forwarded to the agent as

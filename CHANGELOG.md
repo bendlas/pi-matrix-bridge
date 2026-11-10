@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A chat message sent during a compaction is no longer lost. `prompt()` throws
+  "Cannot submit a prompt while compaction is in progress" *before* it looks at
+  `deliverAs`, and since `pi.sendUserMessage()` returns void the rejection was
+  unhandled — the message disappeared with no trace. Inbound messages are now
+  queued and replayed in order once the session is genuinely idle. `!ask`
+  answers are held back the same way instead of being consumed and dropped.
+
 ### Added
 - `!compact` over chat compacts the context and reports usage before and after
   (`42,100 / 200,000 (21%)`), deferring to `agent_settled` when a turn is running
