@@ -95,15 +95,30 @@ describe('lock', () => {
     expect(acquireLock()).toBe(true);
   });
 
-  it('blocks when a live process holds the lock (layer 2)', async () => {
+  it('takes over a lock left by a previous incarnation reusing our PID', async () => {
     const piDir = join(tmpDir, '.pi');
     mkdirSync(piDir, { recursive: true });
-    // Use current PID with a different owner — simulates another instance in
-    // a different process that happens to be alive
-    writeFileSync(join(piDir, 'matrix-bridge.lock'), `${process.pid}:other-instance`);
+    // Same PID as us but an unknown owner: after a restart a container often
+    // reuses the same low PID (the session daemon is always PID 2 here), so this
+    // is a stale lock, not a second process. Refusing it wedges the bridge on
+    // every restart, silently.
+    writeFileSync(join(piDir, 'matrix-bridge.lock'), `${process.pid}:previous-incarnation`);
 
-    // Layer 1 passes (no global flag set).
-    // Layer 2: same PID, different owner → blocked.
+    const { acquireLock } = await importLock(tmpDir);
+    expect(acquireLock()).toBe(true);
+    expect(readFileSync(join(piDir, 'matrix-bridge.lock'), 'utf-8')).toBe(
+      `${process.pid}:${g.__matrixBridgeInstanceId}`,
+    );
+  });
+
+  it('blocks when another live process holds the lock (layer 2)', async () => {
+    const piDir = join(tmpDir, '.pi');
+    mkdirSync(piDir, { recursive: true });
+    // A parent process is always alive and is never us (PID 1 in containers).
+    const livePid = process.ppid && process.ppid !== process.pid ? process.ppid : 1;
+    writeFileSync(join(piDir, 'matrix-bridge.lock'), `${livePid}:other-process`);
+
+    // Layer 1 passes (no global flag set); layer 2 finds a live foreign PID.
     const { acquireLock } = await importLock(tmpDir);
     expect(acquireLock()).toBe(false);
   });

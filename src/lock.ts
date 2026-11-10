@@ -31,10 +31,11 @@ export function acquireLock(): boolean {
     if (fs.existsSync(LOCK_PATH)) {
       const raw = fs.readFileSync(LOCK_PATH, "utf-8").trim().split(":");
       const pid = parseInt(raw[0], 10);
-      const owner = raw[1] ?? "";
-      if (!Number.isNaN(pid) && pid === process.pid && owner !== instanceId) {
-        return false;
-      }
+      // A PID identifies a live process uniquely, so "same PID, different
+      // instance" cannot be a second process: it is a lock left by an earlier
+      // incarnation that reused this PID (containers routinely reuse low PIDs,
+      // e.g. the session daemon is always PID 2). The in-process flag above
+      // already guards real duplicates, so take the lock over.
       if (!Number.isNaN(pid) && pid !== process.pid) {
         try {
           process.kill(pid, 0); // throws if process does not exist

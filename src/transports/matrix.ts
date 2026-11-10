@@ -227,11 +227,14 @@ export class MatrixProvider implements ITransportProvider {
     client.on(RoomEvent.Timeline, this.onTimeline);
     client.on(ClientEvent.Sync, this.onSync);
 
+    logVerification(`connect: client created user=${userId} device=${deviceId ?? "?"} e2ee=${encryptionEnabled}`);
+
     try {
       if (encryptionEnabled) {
         // Restore the crypto store *before* the Rust machine opens it, otherwise
         // it generates new device keys (which un-verifies the device).
         await restoreCryptoStore(CRYPTO_SNAPSHOT_PATH);
+        logVerification("connect: crypto store restored");
         await client.initRustCrypto({
           useIndexedDB: true,
           cryptoDatabasePrefix: CRYPTO_DB_PREFIX,
@@ -304,12 +307,16 @@ export class MatrixProvider implements ITransportProvider {
       });
     } catch (error) {
       // Clean up dangling state so connect() can be retried
+      logVerification(`connect FAILED: ${(error as Error).message}`);
       await this.teardown();
       throw error;
     }
 
     this.connectedAt = Date.now();
     this._isConnected = true;
+    logVerification(
+      `connect: ready device=${this.deviceId ?? "?"} rooms=${this.joinedRooms.size}`,
+    );
   }
 
   async disconnect(): Promise<void> {
@@ -784,7 +791,11 @@ export class MatrixProvider implements ITransportProvider {
     // Pure filter — delegates to testable utility
     const skipReason = shouldSkipEvent(plainEvent, this.botUserId, this.connectedAt, this.joinedRooms, roomId);
     if (skipReason) {
-      logVerification(`chat event skipped (${skipReason}): room=${roomId} sender=${sender}`);
+      // Own messages echo back constantly (streaming edits), so only interesting
+      // skips are worth a line.
+      if (skipReason !== "own_message") {
+        logVerification(`chat event skipped (${skipReason}): room=${roomId} sender=${sender}`);
+      }
       return;
     }
 
