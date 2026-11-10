@@ -6,6 +6,9 @@ describe('parseChatCommand', () => {
     expect(parseChatCommand('!reload')).toEqual({ name: 'reload', arg: '' });
     expect(parseChatCommand('/reload')).toEqual({ name: 'reload', arg: '' });
     expect(parseChatCommand('  !RELOAD  ')).toEqual({ name: 'reload', arg: '' });
+    // People type "! reload" with a space; it must still be recognised.
+    expect(parseChatCommand('! reload')).toEqual({ name: 'reload', arg: '' });
+    expect(parseChatCommand('/  reload')).toEqual({ name: 'reload', arg: '' });
   });
 
   it('keeps the rest of the line as arguments', () => {

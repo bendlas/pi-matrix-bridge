@@ -27,7 +27,8 @@ export interface ChatCommand {
  */
 export function parseChatCommand(text: string): ChatCommand | null {
   const trimmed = text.trim().replace(/\s+@[^\s@:]*(?::[^\s@:]*)?$/, "");
-  const match = /^[/!]([a-zA-Z][a-zA-Z0-9_-]{0,31})(?:\s+([\s\S]*))?$/.exec(trimmed);
+  // Whitespace after the prefix is tolerated: "! reload" is what people type.
+  const match = /^[/!]\s*([a-zA-Z][a-zA-Z0-9_-]{0,31})(?:\s+([\s\S]*))?$/.exec(trimmed);
   if (!match) return null;
   return { name: match[1].toLowerCase(), arg: (match[2] ?? "").trim() };
 }
