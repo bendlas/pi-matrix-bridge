@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ask_user` questions reach the chat.** When the agent posts a question set the
+  room now gets it too, as lettered options (`1a`, `2 <text>`) with the option
+  values the model will see, plus a hint that a plain reply works. Before this,
+  an ask was a browser-only form: the run ended, the room showed a tool line, and
+  there was no way to answer from Matrix. A reply typed in the chat is delivered
+  to the agent as an ordinary message, which is what the browser form's follow-up
+  would have been anyway, so no extra plumbing is needed to route answers back.
 - **Device verification (SAS/emoji).** The bridge can now be verified from Element
   like any other session: `/matrix-bridge verify` lists pending verifications and
   shows the 7 emoji, `verify accept <id>` confirms the match (completing

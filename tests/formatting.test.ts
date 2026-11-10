@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   extractThinkingFromMessage,
+  formatAskQuestions,
   extractToolResultText,
   fencedCode,
   formatThinking,
@@ -253,5 +254,58 @@ describe('formatToolCalls', () => {
     } as any;
     const result = formatToolCalls(msg);
     expect(result).toBe('🔧 `grep` (pattern=a)\n🔧 `read` (path=/b)');
+  });
+
+  describe('formatToolCall', () => {
+    it('summarises ask_user instead of dumping its question JSON', () => {
+      const text = formatToolCall('ask_user', {
+        questions: [{ id: 'a', question: 'Q' }, { id: 'b', question: 'R' }],
+      });
+      expect(text).toBe('🔧 `ask_user` (2 questions)');
+      expect(formatToolCall('ask_user', { questions: [{ id: 'a', question: 'Q' }] })).toBe(
+        '🔧 `ask_user` (1 question)',
+      );
+    });
+  });
+
+  describe('formatAskQuestions', () => {
+    it('renders questions, lettered options and the value only when it differs', () => {
+      const text = formatAskQuestions({
+        questions: [
+          {
+            id: 'lib',
+            question: 'Which SAS library?',
+            detail: 'The fork has verification.',
+            options: [
+              { value: 'matrix-js-sdk', label: 'matrix-js-sdk' },
+              { value: 'js-sdk', label: 'fork', detail: 'with SAS' },
+            ],
+          },
+          { id: 'other', question: 'Anything else?' },
+        ],
+      });
+
+      expect(text).toContain('❓ 2 questions');
+      expect(text).toContain('1) Which SAS library?');
+      expect(text).toContain('   The fork has verification.');
+      expect(text).toContain('   a) matrix-js-sdk');
+      expect(text).not.toContain('a) matrix-js-sdk [');
+      expect(text).toContain('   b) fork [js-sdk] — with SAS');
+      expect(text).toContain('2) Anything else?');
+      expect(text).toContain('   (free text)');
+    });
+
+    it('marks multiple-choice questions and keeps one-question grammar', () => {
+      const text = formatAskQuestions({
+        questions: [{ id: 'x', question: 'Pick', options: [{ value: 'a', label: 'A' }], multiple: true }],
+      });
+
+      expect(text).toContain('❓ 1 question —');
+      expect(text).toContain('1) Pick  (pick several)');
+    });
+
+    it('says how to answer and survives an empty ask', () => {
+      expect(formatAskQuestions({ questions: [] })).toContain('Reply with e.g.');
+    });
   });
 });

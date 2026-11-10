@@ -47,6 +47,14 @@ export function hasToolCalls(message: AssistantMessage): boolean {
  */
 export function formatToolCall(name: string, args: Record<string, unknown> | undefined): string {
   const toolName = name || "tool";
+
+  // ask_user arguments are whole question sets; the rendered form is posted
+  // separately, so a JSON blob here would just be noise.
+  if (toolName === "ask_user") {
+    const count = Array.isArray(args?.questions) ? args.questions.length : 0;
+    return `🔧 \`ask_user\` (${count} question${count === 1 ? "" : "s"})`;
+  }
+
   const argPairs = Object.entries(args || {})
     .map(([k, v]) => {
       const valStr = typeof v === "string" ? v : JSON.stringify(v);
@@ -106,6 +114,55 @@ export function formatToolResult(result: any, isError: boolean): string {
   const marker = isError ? "↳ ⚠️" : "↳";
   const shown = truncate(text, 1500);
   return shown.includes("\n") ? `${marker}\n${fencedCode(shown)}` : `${marker} ${shown}`;
+}
+
+/** One option of an ask_user question. */
+export interface AskQuestionOption {
+  value: string;
+  label: string;
+  detail?: string;
+}
+
+/** One question of an ask_user request. */
+export interface AskQuestion {
+  id: string;
+  question: string;
+  detail?: string;
+  options?: AskQuestionOption[];
+  multiple?: boolean;
+}
+
+/**
+ * Render an ask_user request for the chat, so a question posted as a browser
+ * form is also answerable from Matrix.
+ *
+ * Options get letter keys (`a`, `b`, …) so a reply like "1a 2 yes" is
+ * unambiguous, and the option *value* is shown only when it differs from the
+ * label — the model sees values, the user reads labels.
+ */
+export function formatAskQuestions(ask: { questions: AskQuestion[] }): string {
+  const questions = ask.questions ?? [];
+  const count = questions.length;
+  const lines: string[] = [
+    `❓ ${count} question${count === 1 ? "" : "s"} — answer here in this chat`,
+    "",
+  ];
+
+  questions.forEach((q, i) => {
+    const many = q.multiple ? "  (pick several)" : "";
+    lines.push(`${i + 1}) ${q.question}${many}`);
+    if (q.detail) lines.push(`   ${q.detail}`);
+    (q.options ?? []).forEach((option, j) => {
+      const key = String.fromCharCode(97 + j);
+      const value = option.value === option.label ? "" : ` [${option.value}]`;
+      const detail = option.detail ? ` — ${option.detail}` : "";
+      lines.push(`   ${key}) ${option.label}${value}${detail}`);
+    });
+    if (!(q.options ?? []).length) lines.push("   (free text)");
+  });
+
+  lines.push("", 'Reply with e.g. "1a 2 <text>", or answer the form in pi-web.');
+  return lines.join("\n");
 }
 
 /**

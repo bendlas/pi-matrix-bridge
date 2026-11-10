@@ -2,7 +2,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { loadConfig, saveConfig, shouldAutoConnect } from "./config.js";
-import { extractTextFromMessage, extractThinkingFromMessage, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
+import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { TransportManager } from "./transports/manager.js";
 import { MatrixProvider } from "./transports/matrix.js";
@@ -368,6 +368,35 @@ export default function (pi: ExtensionAPI): void {
     const output = formatToolResult(event.result, event.isError);
     if (output) entry.text += `\n${output}`;
     await flushResponse();
+  });
+
+  /**
+   * Mirror ask_user requests into the chat.
+   *
+   * ask_user posts an interactive form in pi-web, terminates the run, and
+   * delivers the answers later as a follow-up message. From Matrix the room
+   * would otherwise see only a tool-call line and could not answer at all, so
+   * the questions are rendered here as lettered options. A plain reply in the
+   * chat then reaches the agent as a normal message, which is exactly what the
+   * follow-up would have looked like.
+   */
+  pi.on("tool_result", async (event, _context) => {
+    if (event.toolName !== "ask_user" || event.isError) return;
+    const ask = (event.details as { ask?: { questions?: unknown[] } } | undefined)?.ask;
+    if (!ask?.questions?.length) return;
+
+    const chat = pendingRemoteChat;
+    if (!chat) return; // ask was not started from a chat turn
+
+    try {
+      await transportManager.sendMessage(
+        chat.chatId,
+        chat.transport,
+        formatAskQuestions(ask as Parameters<typeof formatAskQuestions>[0])
+      );
+    } catch (err) {
+      ctx.ui.notify(`⚠️ Could not post questions to chat: ${(err as Error).message}`, "warning");
+    }
   });
 
   /**
