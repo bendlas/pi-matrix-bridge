@@ -884,8 +884,14 @@ export class MatrixProvider implements ITransportProvider {
         wasMentioned,
       };
 
-      logVerification(`chat event -> agent: room=${roomId} sender=${sender}`);
-      this.messageHandler(externalMessage);
+      logVerification(`chat event -> handler: room=${roomId} sender=${sender}`);
+      // Handlers may await (e.g. a reload ack) — never let a rejection become an
+      // unhandled one, which would kill the sync loop silently.
+      void Promise.resolve()
+        .then(() => this.messageHandler?.(externalMessage))
+        .catch((err: unknown) => {
+          logVerification(`chat handler FAILED: ${(err as Error).message}`);
+        });
     }
   }
 }

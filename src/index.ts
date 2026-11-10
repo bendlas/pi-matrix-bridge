@@ -5,6 +5,7 @@ import { loadConfig, saveConfig, shouldAutoConnect } from "./config.js";
 import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
 import { answerHint, buildAskOutcome, parseAskAnswers, renderAskAnswersText } from "./ask.js";
 import { isReloadCommand } from "./chat-commands.js";
+import { logVerification } from "./transports/verification.js";
 import type { AskRequest } from "./ask.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { TransportManager } from "./transports/manager.js";
@@ -281,7 +282,7 @@ export default function (pi: ExtensionAPI): void {
       ctx.ui.notify(`❌ Transport initialization failed: ${err.message}`, "error");
     });
 
-    transportManager.onMessage((msg) => {
+    transportManager.onMessage(async (msg) => {
       // "stop" interrupts the current turn. Accept a bare word or a / or !
       // prefix ("stop", "/stop", "!stop"). It's a reserved word for any
       // authorized user (onMessage only fires post-auth) and is not forwarded
@@ -340,18 +341,27 @@ export default function (pi: ExtensionAPI): void {
       // `!reload` / `/reload` from the chat reloads pi (extensions, skills,
       // prompts). Acknowledge first: the reload tears this runtime down.
       if (isReloadCommand(msg.content)) {
-        transportManager
-          .sendMessage(msg.chatId, msg.transport, "🔄 Reloading the pi runtime…")
-          .catch(() => {});
-        if (ctx.isIdle()) {
+        const idle = ctx.isIdle();
+        logVerification(`chat command: ${RELOAD_COMMAND} (${idle ? "idle" : "mid-turn"})`);
+        // Await the ack: reload tears the transport down, and an un-awaited send
+        // is lost, leaving the room silent about a successful reload.
+        try {
+          await transportManager.sendMessage(
+            msg.chatId,
+            msg.transport,
+            idle
+              ? "🔄 Reloading the pi runtime…"
+              : "🔄 Reloading once this turn finishes…"
+          );
+        } catch (err) {
+          ctx.ui.notify(`Failed to send reload ack: ${(err as Error).message}`, "warning");
+        }
+        if (idle) {
           pi.sendUserMessage(`/${RELOAD_COMMAND}`, { expandPromptTemplates: true });
         } else {
           // Mid-turn: the settled handler dispatches once the turn ends, so the
           // reload cannot interrupt running work.
           reloadRequested = true;
-          transportManager
-            .sendMessage(msg.chatId, msg.transport, "…after the current turn finishes.")
-            .catch(() => {});
         }
         return;
       }

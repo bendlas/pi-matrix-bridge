@@ -54,7 +54,7 @@ export interface ITransportProvider {
    * Register callback for incoming messages
    * @param handler - Message handler function
    */
-  onMessage(handler: (message: ExternalMessage) => void): void;
+  onMessage(handler: (message: ExternalMessage) => void | Promise<void>): void;
 
   /**
    * Register callback for errors

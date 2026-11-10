@@ -122,7 +122,7 @@ export class TransportManager {
   /**
    * Register handler for incoming messages from all transports
    */
-  onMessage(handler: (message: ExternalMessage) => void): void {
+  onMessage(handler: (message: ExternalMessage) => void | Promise<void>): void {
     this.messageHandler = handler;
   }
 
