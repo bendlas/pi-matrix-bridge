@@ -29,6 +29,25 @@ import {
 import { getSecretStorageKey } from "./secret-storage.js";
 import { VerificationManager, logVerification, type VerificationNotify, type VerificationSummary } from "./verification.js";
 
+/** A single SDK call must settle within this budget or the queue wedges forever. */
+const SEND_TIMEOUT_MS = 30_000;
+
+/** Reject instead of hanging when an SDK promise never settles. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** One queued outbound request (new message or in-place edit). */
 interface OutboundJob {
   kind: "send" | "edit";
@@ -556,7 +575,11 @@ export class MatrixProvider implements ITransportProvider {
         const job = this.sendQueue[0];
         job.attempts++;
         try {
-          const eventId = await this.dispatch(job);
+          const eventId = await withTimeout(
+            this.dispatch(job),
+            SEND_TIMEOUT_MS,
+            `sending to ${job.chatId} timed out after ${SEND_TIMEOUT_MS}ms`,
+          );
           this.sendQueue.shift();
           job.resolve(eventId);
         } catch (err) {
@@ -732,7 +755,13 @@ export class MatrixProvider implements ITransportProvider {
     // resolves immediately for unencrypted events.
     if (event.isEncrypted()) {
       await client.decryptEventIfNeeded(event);
-      if (event.isDecryptionFailure()) return; // leave a debug trail? silently skip
+      if (event.isDecryptionFailure()) {
+        // A silent skip here looks exactly like "the bot ignores me", so say it.
+        logVerification(
+          `decryption failed: room=${event.getRoomId()} sender=${event.getSender()} id=${event.getId()}`,
+        );
+        return;
+      }
     }
 
     const content = event.getContent();
@@ -754,10 +783,16 @@ export class MatrixProvider implements ITransportProvider {
 
     // Pure filter — delegates to testable utility
     const skipReason = shouldSkipEvent(plainEvent, this.botUserId, this.connectedAt, this.joinedRooms, roomId);
-    if (skipReason) return;
+    if (skipReason) {
+      logVerification(`chat event skipped (${skipReason}): room=${roomId} sender=${sender}`);
+      return;
+    }
 
     const chatId = roomId;
     this.lastChatId = chatId;
+    // Trace arrival, then each later step, so a stalled handler is visible in the
+    // debug log instead of looking like "the bot ignores me".
+    logVerification(`chat event in: room=${roomId} sender=${sender} len=${String(content.body ?? "").length}`);
     const username = extractUsername(sender);
     const messageText = content.body as string;
     const messageId = event.getId() ?? "";
@@ -809,7 +844,10 @@ export class MatrixProvider implements ITransportProvider {
       if (handled) return;
     }
 
-    if (!isAuthorized) return;
+    if (!isAuthorized) {
+      logVerification(`chat event unauthorized: room=${roomId} sender=${sender}`);
+      return;
+    }
 
     // Device verification driven from chat: /verify [list|accept|mismatch|cancel <id>]
     if (this.verification && parseVerifyCommand(messageText)) {
@@ -835,6 +873,7 @@ export class MatrixProvider implements ITransportProvider {
         wasMentioned,
       };
 
+      logVerification(`chat event -> agent: room=${roomId} sender=${sender}`);
       this.messageHandler(externalMessage);
     }
   }
