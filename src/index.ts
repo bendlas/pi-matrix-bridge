@@ -3,12 +3,24 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { loadConfig, saveConfig, shouldAutoConnect } from "./config.js";
 import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
+import { answerHint, buildAskOutcome, parseAskAnswers, renderAskAnswersText } from "./ask.js";
+import type { AskRequest } from "./ask.js";
 import { acquireLock, releaseLock } from "./lock.js";
 import { TransportManager } from "./transports/manager.js";
 import { MatrixProvider } from "./transports/matrix.js";
 import type { PendingRemoteChat, TransportStatus } from "./types.js";
 import { openMainMenu } from "./ui/main-menu.js";
 import { createStatusWidget } from "./ui/status-widget.js";
+
+/**
+ * Custom message type pi-web uses to record answers to an ask_user question set.
+ * Sending it from here makes the transcript (and the web UI reading it) agree
+ * with a submission made in the browser form.
+ */
+const ASK_USER_ANSWERS_CUSTOM_TYPE = "pi-web.ask.answers";
+
+/** The question set the chat may still answer, if one is outstanding. */
+let pendingAsk: AskRequest | null = null;
 
 /** Min interval between in-place edits of a live streamed message. */
 const STREAM_EDIT_THROTTLE_MS = 900;
@@ -257,6 +269,43 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
+      // Answers to an outstanding ask_user question set are delivered as the
+      // same custom message the browser form produces, so the agent and the web
+      // UI both see a submitted answer rather than stray chat text.
+      if (pendingAsk) {
+        const ask = pendingAsk;
+        const skip = stripped === "skip";
+        const answers = skip ? [] : parseAskAnswers(msg.content, ask);
+        if (skip || answers) {
+          const outcome = buildAskOutcome(
+            ask,
+            answers ?? [],
+            new Date().toISOString(),
+            skip ? "cancelled" : "submitted"
+          );
+          pendingAsk = null;
+          pi.sendMessage(
+            {
+              customType: ASK_USER_ANSWERS_CUSTOM_TYPE,
+              content: renderAskAnswersText(outcome),
+              display: true,
+              details: outcome,
+            },
+            { triggerTurn: true, deliverAs: "followUp" }
+          );
+          transportManager
+            .sendMessage(
+              msg.chatId,
+              msg.transport,
+              `✅ ${skip ? "Skipped" : "Answers submitted"} (${outcome.answeredCount}/${outcome.questions.length} answered).`
+            )
+            .catch((err) =>
+              ctx.ui.notify(`Failed to send answer ack: ${(err as Error).message}`, "error")
+            );
+          return;
+        }
+      }
+
       pendingRemoteChat = {
         chatId: msg.chatId,
         transport: msg.transport,
@@ -385,6 +434,11 @@ export default function (pi: ExtensionAPI): void {
     const ask = (event.details as { ask?: { questions?: unknown[] } } | undefined)?.ask;
     if (!ask?.questions?.length) return;
 
+    // Remembered so a reply in the chat can be delivered as a real answer; the
+    // question set itself is durable in the transcript, but only this process
+    // can submit an outcome.
+    pendingAsk = ask as unknown as AskRequest;
+
     const chat = pendingRemoteChat;
     if (!chat) return; // ask was not started from a chat turn
 
@@ -392,7 +446,7 @@ export default function (pi: ExtensionAPI): void {
       await transportManager.sendMessage(
         chat.chatId,
         chat.transport,
-        formatAskQuestions(ask as Parameters<typeof formatAskQuestions>[0])
+        `${formatAskQuestions(ask as Parameters<typeof formatAskQuestions>[0])}\n\n${answerHint()}`
       );
     } catch (err) {
       ctx.ui.notify(`⚠️ Could not post questions to chat: ${(err as Error).message}`, "warning");

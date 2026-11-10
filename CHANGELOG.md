@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there was no way to answer from Matrix. A reply typed in the chat is delivered
   to the agent as an ordinary message, which is what the browser form's follow-up
   would have been anyway, so no extra plumbing is needed to route answers back.
+- **Answers typed in the chat are submitted as real answers.** `1a 2c` selects
+  options, `1a ~ note` adds a comment, `2: free text` answers with custom text,
+  `/skip` skips the set. A structured answer is delivered as pi-web's own
+  `pi-web.ask.answers` custom message, so the transcript and the web form agree
+  instead of leaving a stray chat message. Parsing is strict — every segment must
+  parse, and unknown questions or unoffered options fall back to a plain message
+  — because a normal message must never be swallowed by a guess. The outstanding
+  set lives in memory, so after a bridge restart replies simply go through as
+  ordinary messages again.
 - **Device verification (SAS/emoji).** The bridge can now be verified from Element
   like any other session: `/matrix-bridge verify` lists pending verifications and
   shows the 7 emoji, `verify accept <id>` confirms the match (completing

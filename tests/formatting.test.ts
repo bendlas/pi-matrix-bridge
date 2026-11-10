@@ -304,8 +304,8 @@ describe('formatToolCalls', () => {
       expect(text).toContain('1) Pick  (pick several)');
     });
 
-    it('says how to answer and survives an empty ask', () => {
-      expect(formatAskQuestions({ questions: [] })).toContain('Reply with e.g.');
+    it('survives an empty ask', () => {
+      expect(formatAskQuestions({ questions: [] })).toContain('❓ 0 questions');
     });
   });
 });

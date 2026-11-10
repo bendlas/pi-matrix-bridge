@@ -161,7 +161,6 @@ export function formatAskQuestions(ask: { questions: AskQuestion[] }): string {
     if (!(q.options ?? []).length) lines.push("   (free text)");
   });
 
-  lines.push("", 'Reply with e.g. "1a 2 <text>", or answer the form in pi-web.');
   return lines.join("\n");
 }
 
