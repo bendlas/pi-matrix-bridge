@@ -74,6 +74,30 @@ describe('parseAskAnswers', () => {
     expect(parseAskAnswers('1a\n2b', ask)).toHaveLength(2);
   });
 
+  it('keeps a comment that itself contains colons and questions', () => {
+    // Real message from the first live test: prose with "2:" and "also:" inside
+    // the comment must stay in the comment rather than start a new answer.
+    const text =
+      '1a ~ are we still on sas-verification, even with the ask tool? 2: is this free text? ' +
+      'also: does the second colon confuse the parser?';
+    expect(parseAskAnswers(text, ask)).toEqual([
+      {
+        id: 'reached',
+        values: ['yes'],
+        comment:
+          'are we still on sas-verification, even with the ask tool? 2: is this free text? ' +
+          'also: does the second colon confuse the parser?',
+      },
+    ]);
+  });
+
+  it('falls back to a plain message when a comment breaks the segment grammar', () => {
+    // ';' and newlines separate segments, so prose that contains them cannot be
+    // attributed to one answer. Dropping to the plain path is deliberate.
+    expect(parseAskAnswers('1a ~ note; with semicolon', ask)).toBeNull();
+    expect(parseAskAnswers('1a ~ note\nand more prose here', ask)).toBeNull();
+  });
+
   it('returns null for prose, so real messages are never swallowed', () => {
     expect(parseAskAnswers('do it 2 times please', ask)).toBeNull();
     expect(parseAskAnswers('ok, sounds good', ask)).toBeNull();
