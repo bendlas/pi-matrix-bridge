@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers are held back the same way instead of being consumed and dropped.
 
 ### Added
+- `!steer <instruction>` sends the text as a `steer` message so it lands inside
+  the running turn instead of after it (`followUp`, which is the default for
+  mid-turn messages). Idle, there is nothing to steer into, so it is delivered
+  as a normal message; during a compaction it is queued, never dropped.
 - `!compact` over chat compacts the context and reports usage before and after
   (`42,100 / 200,000 (21%)`), deferring to `agent_settled` when a turn is running
   because compacting mid-request races the running call. Tokens are unknown right

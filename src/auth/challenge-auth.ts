@@ -411,6 +411,7 @@ _Commands accept either a \`/\` or \`!\` prefix (e.g. \`/help\` or \`!help\`)._
 • \`/session\` — Show current session info (model, context, status)
 • \`/reload\` — Reload extensions, skills and prompts (waits for the current turn)
 • \`/compact\` — Compact the context (waits for the current turn)
+• \`/steer <text>\` — Inject text into the running turn instead of queueing it
 • \`/shutdown\` — Stop pi (restarts into a fresh session under systemd)
 
 *Any authorized user:*

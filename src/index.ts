@@ -5,7 +5,7 @@ import { loadConfig, saveConfig, shouldAutoConnect } from "./config.js";
 import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions, formatThinking, formatToolCall, formatToolResult, hasToolCalls, splitMessage } from "./formatting.js";
 import { answerHint, buildAskOutcome, parseAskAnswers, renderAskAnswersText } from "./ask.js";
 import { formatContextUsage } from "./formatting.js";
-import { chatCommandName } from "./chat-commands.js";
+import { chatCommand } from "./chat-commands.js";
 import { createPendingMessages } from "./pending-messages.js";
 import { logVerification } from "./transports/verification.js";
 import type { AskRequest } from "./ask.js";
@@ -465,9 +465,9 @@ export default function (pi: ExtensionAPI): void {
 
       // `!reload` / `/reload` from the chat reloads pi (extensions, skills,
       // prompts). Acknowledge first: the reload tears this runtime down.
-      const chatCommand = chatCommandName(msg.content);
+      const command = chatCommand(msg.content);
 
-      if (chatCommand === "compact") {
+      if (command?.name === "compact") {
         if (ctx.isIdle()) {
           runCompaction(msg.chatId, msg.transport);
         } else {
@@ -480,7 +480,50 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      if (chatCommand === "reload") {
+      if (command?.name === "steer") {
+        const instruction = command.arg.trim();
+        if (!instruction) {
+          await transportManager
+            .sendMessage(msg.chatId, msg.transport, "Usage: `!steer <instruction for the running turn>`")
+            .catch(() => {});
+          return;
+        }
+        if (compactionInFlight) {
+          pendingChatMessages.push({ ...msg, content: instruction });
+          await transportManager
+            .sendMessage(
+              msg.chatId,
+              msg.transport,
+              `⏳ Compaction is running — queued as a normal message (${pendingChatMessages.size()} waiting).`
+            )
+            .catch(() => {});
+          return;
+        }
+        if (ctx.isIdle()) {
+          // Nothing to steer into; deliver it rather than swallow it.
+          forwardToAgent({ ...msg, content: instruction });
+          await transportManager
+            .sendMessage(msg.chatId, msg.transport, "▶️ No turn running — sent as a normal message.")
+            .catch(() => {});
+          return;
+        }
+        pendingRemoteChat = {
+          chatId: msg.chatId,
+          transport: msg.transport,
+          username: msg.username,
+          messageId: msg.messageId,
+        };
+        logVerification("chat command: steer");
+        pi.sendUserMessage(`[📱 @${msg.username} via ${msg.transport}]: ${instruction}`, {
+          deliverAs: "steer",
+        });
+        await transportManager
+          .sendMessage(msg.chatId, msg.transport, "🎯 Steered into the running turn.")
+          .catch(() => {});
+        return;
+      }
+
+      if (command?.name === "reload") {
         const idle = ctx.isIdle();
         logVerification(`chat command: ${RELOAD_COMMAND} (${idle ? "idle" : "mid-turn"})`);
         // Await the ack: reload tears the transport down, and an un-awaited send

@@ -10,7 +10,7 @@
  */
 
 /** Commands the bridge acts on itself instead of forwarding them. */
-export const CHAT_COMMANDS = ["reload", "compact"] as const;
+export const CHAT_COMMANDS = ["reload", "compact", "steer"] as const;
 
 /** A parsed `!name arg…` message. */
 export interface ChatCommand {
@@ -34,14 +34,17 @@ export function parseChatCommand(text: string): ChatCommand | null {
 }
 
 /**
- * The bridge command a message names, or null when the message is for the agent.
+ * The bridge command a message names, with its argument, or null when the
+ * message is for the agent.
  *
  * Only names listed in CHAT_COMMANDS are intercepted: any other `/` or `!` text
  * is ordinary conversation and must reach the model.
  */
-export function chatCommandName(text: string): (typeof CHAT_COMMANDS)[number] | null {
+export function chatCommand(
+  text: string
+): { name: (typeof CHAT_COMMANDS)[number]; arg: string } | null {
   const command = parseChatCommand(text);
   if (!command) return null;
   const known = CHAT_COMMANDS.find((name) => name === command.name);
-  return known ?? null;
+  return known ? { name: known, arg: command.arg } : null;
 }

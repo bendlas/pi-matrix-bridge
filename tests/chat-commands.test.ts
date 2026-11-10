@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHAT_COMMANDS, chatCommandName, parseChatCommand } from '../src/chat-commands.js';
+import { CHAT_COMMANDS, chatCommand, parseChatCommand } from '../src/chat-commands.js';
 
 describe('parseChatCommand', () => {
   it('parses both prefixes and normalises the name', () => {
@@ -30,23 +30,42 @@ describe('parseChatCommand', () => {
   });
 });
 
-describe('chatCommandName', () => {
+describe('chatCommand', () => {
   it('accepts the bridge commands only', () => {
-    expect(chatCommandName('!reload')).toBe('reload');
-    expect(chatCommandName('/reload')).toBe('reload');
-    expect(chatCommandName('!compact')).toBe('compact');
-    expect(chatCommandName('/compact')).toBe('compact');
+    expect(chatCommand('!reload')).toEqual({ name: 'reload', arg: '' });
+    expect(chatCommand('/reload')).toEqual({ name: 'reload', arg: '' });
+    expect(chatCommand('!compact')).toEqual({ name: 'compact', arg: '' });
+    expect(chatCommand('/compact')).toEqual({ name: 'compact', arg: '' });
+  });
+
+  it('carries the argument for commands that take one', () => {
+    expect(chatCommand('!steer stop editing tests, fix the parser')).toEqual({
+      name: 'steer',
+      arg: 'stop editing tests, fix the parser',
+    });
+    // Whitespace after the prefix, as people type it.
+    expect(chatCommand('! steer  look at the lock file')).toEqual({
+      name: 'steer',
+      arg: 'look at the lock file',
+    });
+    // A trailing mention is stripped, not steered.
+    expect(chatCommand('!steer hurry @frogbot:bendlas.net')).toEqual({
+      name: 'steer',
+      arg: 'hurry',
+    });
   });
 
   it('leaves everything else to the agent', () => {
-    expect(chatCommandName('!help')).toBeNull(); // handled by the auth layer
-    expect(chatCommandName('!verify start X')).toBeNull(); // handled by the transport
-    expect(chatCommandName('reload')).toBeNull(); // no prefix: plain text
-    expect(chatCommandName('!reboot')).toBeNull(); // not a command we own
+    expect(chatCommand('!help')).toBeNull(); // handled by the auth layer
+    expect(chatCommand('!verify start X')).toBeNull(); // handled by the transport
+    expect(chatCommand('reload')).toBeNull(); // no prefix: plain text
+    expect(chatCommand('!reboot')).toBeNull(); // not a command we own
+    expect(chatCommand('!steering wheel alignment')).toBeNull(); // not an exact name
   });
 
   it('documents what it handles', () => {
     expect(CHAT_COMMANDS).toContain('reload');
     expect(CHAT_COMMANDS).toContain('compact');
+    expect(CHAT_COMMANDS).toContain('steer');
   });
 });

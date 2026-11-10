@@ -208,6 +208,9 @@ pi-web's own command set leaves the name free) from a trusted user's DM:
 - `!compact` — compact the context and report the usage before and after.
   Deferred to the end of the turn if the agent is busy, because compacting
   mid-request races the running call.
+- `!steer <instruction>` — inject the instruction into the *running* turn instead
+  of waiting behind it (`followUp`). With no turn running there is nothing to
+  steer into, so it is delivered as a normal message rather than swallowed.
 - `!help`, `!session`, `stop`, `!matrix-bridge verify …` — see `/help`.
 
 A message that arrives while a compaction runs is queued rather than dropped:
