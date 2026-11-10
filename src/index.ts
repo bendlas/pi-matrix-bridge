@@ -6,6 +6,7 @@ import { extractTextFromMessage, extractThinkingFromMessage, formatAskQuestions,
 import { answerHint, buildAskOutcome, parseAskAnswers, renderAskAnswersText } from "./ask.js";
 import { formatContextUsage } from "./formatting.js";
 import { chatCommand } from "./chat-commands.js";
+import { queueReason } from "./delivery.js";
 import { createPendingMessages } from "./pending-messages.js";
 import { logVerification } from "./transports/verification.js";
 import type { AskRequest } from "./ask.js";
@@ -38,6 +39,12 @@ let reloadRequested = false;
 
 /** Deferred `!compact`, run once the current turn settles. */
 let compactRequestedFor: { chatId: string; transport: string } | null = null;
+
+/** An ask answer set accepted during a turn, to be submitted once it settles. */
+let queuedAskOutcome: {
+  outcome: ReturnType<typeof buildAskOutcome>;
+  chat: ExternalMessage;
+} | null = null;
 
 /** Chat messages that arrived while pi refused prompts (compaction in flight). */
 const pendingChatMessages = createPendingMessages<ExternalMessage>();
@@ -200,16 +207,21 @@ export default function (pi: ExtensionAPI): void {
    * the rejection used to be unhandled and the message vanished.
    */
   function forwardToAgent(msg: ExternalMessage): void {
-    if (compactionInFlight) {
+    const reason = queueReason(ctx.isIdle(), compactionInFlight);
+    if (reason) {
       pendingChatMessages.push(msg);
-      logVerification(`chat event queued (compaction in flight): queue=${pendingChatMessages.size()}`);
-      transportManager
-        .sendMessage(
-          msg.chatId,
-          msg.transport,
-          `⏳ Compaction is running — queued (${pendingChatMessages.size()} waiting).`
-        )
-        .catch(() => {});
+      logVerification(`chat event queued (${reason}): queue=${pendingChatMessages.size()}`);
+      if (reason === "compaction") {
+        // A turn looks busy on its own; compaction can run while nothing visibly
+        // happens, so say why the message is waiting.
+        transportManager
+          .sendMessage(
+            msg.chatId,
+            msg.transport,
+            `⏳ Compaction is running — queued (${pendingChatMessages.size()} waiting).`
+          )
+          .catch(() => {});
+      }
       return;
     }
 
@@ -221,16 +233,39 @@ export default function (pi: ExtensionAPI): void {
     };
 
     const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
-    // Only queue as a follow-up when the agent is mid-turn — that's the case
-    // `followUp` was added for (avoiding a crash on a message arriving during
-    // a turn, fixes #10). When idle, send normally so the message triggers a
-    // turn and renders immediately; otherwise the very first message can sit
-    // in the queue without ever showing.
+    // Never `deliverAs: "followUp"`: pi would run the message as a separate turn
+    // after `turn_end`, which is exactly where the routing to this chat is
+    // cleared again — the follow-up turn's answer would go nowhere. Queuing in
+    // the bridge and delivering when settled keeps routing and delivery together.
     //
     // `pi.sendUserMessage()` returns void, so a rejection inside pi cannot be
     // observed here — hence the guard above rather than a catch here.
-    logVerification(`chat event -> agent: room=${msg.chatId} idle=${ctx.isIdle()}`);
-    pi.sendUserMessage(taggedMessage, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+    logVerification(`chat event -> agent: room=${msg.chatId}`);
+    pi.sendUserMessage(taggedMessage);
+  }
+
+  /**
+   * Submit an ask answer set as the custom message the browser form produces.
+   *
+   * Routing is set first: turn_end clears it after sending a reply, so a turn
+   * started later would have nowhere to send its answer.
+   */
+  function submitAskOutcome(outcome: ReturnType<typeof buildAskOutcome>, chat: ExternalMessage): void {
+    pendingRemoteChat = {
+      chatId: chat.chatId,
+      transport: chat.transport,
+      username: chat.username,
+      messageId: chat.messageId,
+    };
+    pi.sendMessage(
+      {
+        customType: ASK_USER_ANSWERS_CUSTOM_TYPE,
+        content: renderAskAnswersText(outcome),
+        display: true,
+        details: outcome,
+      },
+      { triggerTurn: true }
+    );
   }
 
   /**
@@ -332,6 +367,14 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", () => {
+    if (queuedAskOutcome) {
+      const held = queuedAskOutcome;
+      queuedAskOutcome = null;
+      logVerification("ask answers: submitting held outcome");
+      submitAskOutcome(held.outcome, held.chat);
+      return;
+    }
+    flushPendingChatMessages();
     if (compactRequestedFor) {
       const target = compactRequestedFor;
       compactRequestedFor = null;
@@ -432,24 +475,26 @@ export default function (pi: ExtensionAPI): void {
             new Date().toISOString(),
             skip ? "cancelled" : "submitted"
           );
-          if (compactionInFlight) {
-            // pi refuses prompts while compacting; keep the ask open so the
-            // answers are not consumed and lost.
+          const reason = queueReason(ctx.isIdle(), compactionInFlight);
+          if (reason) {
+            // Submitting now would start a turn after this one ends, where the
+            // routing has already been cleared. Hold the outcome instead and
+            // submit it once the agent settles; the ask stays answered.
+            queuedAskOutcome = { outcome, chat: msg };
+            pendingAsk = null;
             await transportManager
-              .sendMessage(msg.chatId, msg.transport, "⏳ Compaction is running — reopening answers afterwards.")
+              .sendMessage(
+                msg.chatId,
+                msg.transport,
+                reason === "compaction"
+                  ? "⏳ Compaction is running — answers held until it finishes."
+                  : "⏳ Answers held until the current turn finishes."
+              )
               .catch(() => {});
             return;
           }
           pendingAsk = null;
-          pi.sendMessage(
-            {
-              customType: ASK_USER_ANSWERS_CUSTOM_TYPE,
-              content: renderAskAnswersText(outcome),
-              display: true,
-              details: outcome,
-            },
-            { triggerTurn: true, deliverAs: "followUp" }
-          );
+          submitAskOutcome(outcome, msg);
           transportManager
             .sendMessage(
               msg.chatId,

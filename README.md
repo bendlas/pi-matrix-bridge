@@ -213,10 +213,13 @@ pi-web's own command set leaves the name free) from a trusted user's DM:
   steer into, so it is delivered as a normal message rather than swallowed.
 - `!help`, `!session`, `stop`, `!matrix-bridge verify …` — see `/help`.
 
-A message that arrives while a compaction runs is queued rather than dropped:
-pi refuses prompts mid-compaction, so the bridge holds the message and replays
-it, in order, once the session is idle again (`⏳ Compaction is running — queued
-(1 waiting)`).
+A message that arrives while a turn runs, or while a compaction runs, is queued
+rather than handed to pi's `followUp`: that mechanism starts the message as a
+separate turn *after* `turn_end`, which is where the reply to the previous turn
+is sent and the routing back to the chat is cleared — so the follow-up's answer
+had nowhere to go. The bridge queues instead and delivers once the agent has
+settled, which keeps routing and delivery together. `⏳ Compaction is running —
+queued (1 waiting)` tells the sender when the wait is not obvious.
 
 Answering an `ask_user` question set works as a plain reply: `1a 2c` picks
 options, `1a ~ note` adds a comment, `2: free text` answers with custom text and

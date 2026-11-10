@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Replies to a message that arrived mid-turn are routed back to the chat again.
+  Such a message was handed to pi with `deliverAs: "followUp"`, which starts it
+  as a separate turn *after* `turn_end` — and `turn_end` is where the reply is
+  sent and the routing cleared, so the follow-up turn's answer had no
+  destination and vanished. Chat messages are now queued by the bridge and
+  delivered at `agent_settled`, and `ask_user` answers submitted mid-turn are
+  held the same way instead of starting an unrouted turn.
 - A chat message sent during a compaction is no longer lost. `prompt()` throws
   "Cannot submit a prompt while compaction is in progress" *before* it looks at
   `deliverAs`, and since `pi.sendUserMessage()` returns void the rejection was
